@@ -15,6 +15,8 @@ installed Ollama model `qwen35-9b-alltag-64k:latest` (MLX runner).
 - JavaScript syntax check passed on Node 22.
 - `pip check` passed.
 - Wheel and source distribution built; wheel includes all four frontend assets.
+- All six GitHub Actions jobs passed: Linux and macOS on Python 3.11, 3.12 and 3.14.
+  [Verified CI run](https://github.com/qubit85/Drivestigate/actions/runs/40227258169).
 
 ## Live local-model acceptance
 
@@ -53,9 +55,9 @@ This is a metadata scalability check, not a USB-drive or live-inference benchmar
 
 ## Release boundaries
 
-- macOS desktop integration is the supported user-facing target. The CI workflow also
-  defines core checks on Linux and Python 3.11/3.12/3.14; remote results must be checked
-  in GitHub Actions after publication.
+- macOS desktop integration is the supported user-facing target. The Linux/macOS core
+  test and package matrix passed on Python 3.11, 3.12 and 3.14; native Finder actions
+  were additionally verified on the local Mac.
 - A physical removable drive, failing hardware, and a real unplug/replug cycle were not
   available for acceptance testing. Simulated disconnect/replacement and persistence
   behavior are covered by tests. Treat this as a tested local release, not a forensic certification.
