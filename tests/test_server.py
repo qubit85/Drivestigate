@@ -27,7 +27,9 @@ def server(tmp_path):
 def request(server, path, payload=None, auth=True, **headers):
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     if auth:
-        headers.update({"Cookie": f"dv_session={server.token}", "X-Drivestigate-Token": server.token})
+        headers.update(
+            {"Cookie": f"{server.cookie_name}={server.token}", "X-Drivestigate-Token": server.token}
+        )
     headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
         server.origin + path, data=None if payload is None else json.dumps(payload).encode(), headers=headers
@@ -62,7 +64,7 @@ def test_mutations_require_csrf_header(server):
     req = urllib.request.Request(
         server.origin + "/api/demo",
         data=b"{}",
-        headers={"Cookie": f"dv_session={server.token}", "Content-Type": "application/json"},
+        headers={"Cookie": f"{server.cookie_name}={server.token}", "Content-Type": "application/json"},
     )
     with pytest.raises(urllib.error.HTTPError) as exc:
         opener.open(req)
@@ -127,3 +129,25 @@ def test_detail_graph_and_vault_routes_are_scoped(server, tmp_path):
         assert "Drivestigate-Vault/Investigation.md" in archive.namelist()
         assert len([p for p in archive.namelist() if p.startswith("Drivestigate-Vault/Files/")]) == 13
         assert not any(p.endswith(".bin") or "/../" in p for p in archive.namelist())
+
+
+def test_browser_sessions_are_isolated_by_local_port(server, tmp_path):
+    from http.cookiejar import CookieJar
+
+    second = AppServer(("127.0.0.1", 0), Store(tmp_path / "second/db"))
+    thread = threading.Thread(target=second.serve_forever, daemon=True)
+    thread.start()
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(CookieJar())
+    )
+    try:
+        for instance in (server, second):
+            opener.open(instance.origin).close()
+        for instance in (server, second):
+            with opener.open(instance.origin + "/api/settings") as response:
+                assert response.status == 200
+        assert server.cookie_name != second.cookie_name
+    finally:
+        second.shutdown()
+        second.server_close()
+        thread.join(3)

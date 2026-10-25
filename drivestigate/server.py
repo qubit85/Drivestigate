@@ -38,6 +38,7 @@ class AppServer(ThreadingHTTPServer):
         self.engine = engine or Engine(store)
         self.token = secrets.token_urlsafe(32)
         self.origin = f"http://127.0.0.1:{self.server_port}"
+        self.cookie_name = f"dv_session_{self.server_port}"
         self.engine.origin = self.origin
         self.stats_cache = {}
 
@@ -75,7 +76,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         if cookie:
             self.send_header(
-                "Set-Cookie", f"dv_session={self.server.token}; Path=/; HttpOnly; SameSite=Strict"
+                "Set-Cookie",
+                f"{self.server.cookie_name}={self.server.token}; Path=/; HttpOnly; SameSite=Strict",
             )
         self.end_headers()
         self.wfile.write(body)
@@ -92,7 +94,8 @@ class Handler(BaseHTTPRequestHandler):
         cookie = SimpleCookie()
         try:
             cookie.load(self.headers.get("Cookie", ""))
-            token = cookie["dv_session"].value if "dv_session" in cookie else ""
+            name = self.server.cookie_name
+            token = cookie[name].value if name in cookie else ""
             return hmac.compare_digest(token, self.server.token) and (
                 not write
                 or hmac.compare_digest(self.headers.get("X-Drivestigate-Token", ""), self.server.token)

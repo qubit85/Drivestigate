@@ -6,7 +6,7 @@ Only synthetic sources were used for acceptance testing.
 
 ## Automated checks
 
-- **53 tests passed**, including the existing inventory, source integrity, budget,
+- **54 tests passed**, including the existing inventory, source integrity, budget,
   disconnect, extraction, model validation and local-session security checks.
 - New checks cover persistent queue order, stale/repeated ID rejection, enqueueing
   while busy, automatic continuation, disconnected-job bypass and restart recovery.
@@ -17,6 +17,7 @@ Only synthetic sources were used for acceptance testing.
   v1 catalog migration, rough phase ETA behavior, scoped API access and ZIP exports pass.
 - Obsidian wikilinks resolve to generated notes, unsafe labels remain literal, original
   files are absent, excerpts are omitted by default, and rebuilding preserves older vaults.
+- Two local ports retain independent sessions in one browser cookie jar.
 - HTML/CSV/JSON detail reports include the file coverage ledger and known file links.
 - Ruff lint/format, Node 22 syntax checks for both scripts and `pip check` passed.
 - CI defines Linux/macOS checks on Python 3.11, 3.12 and 3.14, plus wheel/source builds.
