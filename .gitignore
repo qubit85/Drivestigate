@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.data/
+.test-data/
+.DS_Store
+*.sqlite*
+*.log
+.env
+*.spec

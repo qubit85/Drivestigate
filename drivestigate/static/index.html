@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="drivestigate-token" content="__CSRF_TOKEN__">
+  <meta name="color-scheme" content="light">
+  <title>Drivestigate · Investigate your drives</title>
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="Drivestigate home"><img src="/icon.svg" alt="" width="38" height="38"><span>Drivestigate<small>YOUR LOCAL DRIVE DETECTIVE</small></span></a>
+  <div class="workspace-label">WORKSPACE</div>
+  <nav aria-label="Main navigation">
+    <button id="nav-overview" class="nav-item active"><span aria-hidden="true">◫</span>&nbsp;Overview</button>
+    <button id="nav-new" class="nav-item"><span aria-hidden="true">＋</span> New investigation</button>
+    <button id="mobile-settings" class="nav-item mobile-settings"><span aria-hidden="true">⚙</span> Settings</button>
+  </nav>
+  <div class="workspace-label recent-label">INVESTIGATIONS <span id="scan-count">0</span></div>
+  <div id="scan-list" class="scan-list"></div>
+  <div class="sidebar-bottom">
+    <div class="local-note"><span class="local-dot"></span><div>Your data stays with you.<small>Processed locally with Ollama</small></div></div>
+    <button id="open-settings" class="nav-item"><span aria-hidden="true">⚙</span> Settings</button>
+    <div class="version">DRIVESTIGATE <span id="version">1.0.0</span></div>
+  </div>
+</aside>
+<main>
+  <header class="topbar"><div id="breadcrumb">Workspace <span>/</span>&nbsp;Overview</div><button id="connection" class="connection"><span class="status-dot"></span><span id="connection-label">Checking Ollama …</span></button></header>
+  <section id="overview-view" class="view">
+    <div class="eyebrow">LESS NOISE. MORE DISCOVERY.</div>
+    <div class="page-heading"><div><h1>What’s hiding on your drives?</h1><p>Old drives. Forgotten projects. Something worth rediscovering.</p></div><button class="primary" id="start-new">＋ Start investigation</button></div>
+    <div class="hero-panel">
+      <div class="hero-copy"><span class="tag">LOCAL AI · READ ONLY</span><h2>Find the stories<br>in your storage.</h2><p>Get a clear overview, look past technical clutter, and follow promising leads with focused AI sampling.</p><button class="dark-button" id="hero-new">Investigate a drive <span aria-hidden="true">↗</span></button></div>
+      <div class="hero-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="file-tile tile-one">.pdf<span>DOCUMENTS</span></div><div class="file-tile tile-two">&lt;/&gt;<span>PROJECTS</span></div><div class="drive-art"><div class="drive-ring"></div><div class="drive-led"></div></div><div class="lens-art"></div><div class="found-badge">✦ Something worth keeping</div></div>
+    </div>
+    <div class="section-heading"><h2>Your investigations</h2><span id="overview-count" class="muted"></span></div>
+    <div id="overview-scans" class="overview-scans"></div>
+    <div class="workflow-grid"><div><span class="step-number">01</span><h3>Map the terrain</h3><p>Catalog structure and metadata without reading every file’s contents.</p></div><div><span class="step-number">02</span><h3>Follow the clues</h3><p>Local AI reviews samples and decides where a closer look could pay off.</p></div><div><span class="step-number">03</span><h3>Rediscover what matters</h3><p>Useful paths, transparent evidence, and one click to reveal them in Finder.</p></div></div>
+  </section>
+  <section id="new-view" class="view" hidden>
+    <div class="eyebrow">START AN INVESTIGATION</div><h1>A new lead.</h1><p class="subtitle">Choose a drive or folder. Drivestigate does not modify your source files.</p>
+    <form id="new-form" class="surface new-form">
+      <label for="scan-name">Investigation name <span class="muted">optional</span></label><input id="scan-name" maxlength="100" placeholder="For example: Old backup drive">
+      <label for="scan-root">Drive or folder</label><div class="input-action"><input id="scan-root" required placeholder="/Volumes/My Drive" autocomplete="off"><button type="button" id="pick-folder" class="secondary">Choose …</button></div>
+      <div id="volumes" class="volume-list"></div>
+      <div class="scan-config"><div><small>MODEL</small><strong id="new-model"></strong></div><div><small>SCAN DEPTH</small><strong id="new-depth"></strong></div><button type="button" id="new-settings" class="text-button">Customize ↗</button></div>
+      <div id="focus-preview" class="focus-preview"></div>
+      <p class="hint">A complete metadata inventory comes first. Time, read, and AI budgets limit the subsequent investigation. You can pause and resume later.</p>
+      <div class="form-footer"><button type="button" id="demo" class="text-button">Try with synthetic demo data</button><button class="primary" id="submit-scan" type="submit">Start investigation ↗</button></div>
+    </form>
+  </section>
+  <section id="report-view" class="view" hidden>
+    <div class="eyebrow">INVESTIGATION REPORT</div>
+    <div class="page-heading"><div><h1 id="report-title"></h1><p id="report-root" class="path"></p></div><div class="report-actions"><button id="pause-scan" class="secondary">Pause</button><button id="resume-scan" class="primary">Resume</button><button id="stop-scan" class="secondary">Stop</button></div></div>
+    <div id="scan-status" class="status-panel" role="status"><span class="status-dot"></span><span id="scan-status-text"></span><span id="scan-state" class="state-label"></span></div>
+    <div id="disconnected" class="notice" hidden>Drive disconnected. Your report is still available. Reconnect the original drive to open paths or resume the investigation.</div>
+    <div id="metrics" class="metrics"></div>
+    <div class="coverage surface"><div><h3>How much was investigated?</h3><p id="coverage-text"></p></div><div class="coverage-bar"><div id="coverage-fill"></div></div><small>Samples provide orientation. An AI assessment is not an exhaustive content review or permission to delete files.</small></div>
+    <div class="section-heading"><h2>Findings & open leads <span id="finding-count" class="count-pill"></span></h2><div class="export-links" aria-label="Export report"><a id="export-html">HTML ↗</a><a id="export-csv">CSV ↗</a><a id="export-json">JSON ↗</a></div></div>
+    <div class="report-toolbar"><label class="search-input"><span aria-hidden="true">⌕</span><input id="finding-search" type="search" placeholder="Search paths or descriptions …" aria-label="Search findings"></label><select id="priority-filter" aria-label="Filter by priority"><option value="">All priorities</option><option value="1">Take a closer look</option><option value="2">Worth reviewing</option><option value="3">Lower priority</option></select></div>
+    <div id="findings" class="findings"></div><div id="pagination" class="pagination"></div>
+    <details class="surface scan-details"><summary>Technical files, file types & skipped paths</summary><div id="type-breakdown"></div><p id="technical-summary"></p><div id="scan-events"></div></details>
+    <details class="surface scan-details"><summary>Settings used for this investigation</summary><pre id="scan-settings"></pre></details>
+  </section>
+</main>
+<dialog id="settings-dialog" aria-labelledby="settings-title">
+  <form id="settings-form">
+    <div class="dialog-header"><div><div class="eyebrow">MAKE IT YOUR INVESTIGATION</div><h2 id="settings-title">Settings</h2></div><button type="button" id="close-settings" class="icon-button" aria-label="Close settings">×</button></div>
+    <div class="settings-body">
+      <div class="settings-section"><h3>Local language model</h3><p>Content is sent exclusively to your local Ollama service.</p><label for="ollama-url">Ollama address</label><input id="ollama-url" required type="url"><div class="label-row"><label for="model-select">Model</label><button type="button" id="refresh-models" class="text-button">Refresh models ↻</button></div><select id="model-select" required></select><div class="connection-test"><button type="button" id="test-model" class="secondary">Test connection</button><span id="model-test-result" role="status"></span></div></div>
+      <div class="settings-section"><h3>What should the AI look for?</h3><p>This search brief supplements the system prompt. For example: “Look for personal projects, old photo archives, and wallet files.”</p><label for="search-focus">Search focus</label><textarea id="search-focus" rows="4" maxlength="8000" placeholder="What would you like to rediscover?"></textarea><div class="profile-row"><select id="profile-select" aria-label="Load search profile"><option value="">Load search profile …</option></select><button type="button" id="save-profile" class="secondary">Save as profile</button><button type="button" id="delete-profile" class="text-button">Remove</button></div><input id="profile-name" maxlength="80" placeholder="Name for a new or existing profile" aria-label="Profile name"></div>
+      <div class="settings-section"><div class="label-row"><h3>System prompt</h3><button type="button" id="reset-prompt" class="text-button">Restore default</button></div><p>The core brief for assessments. Read-only access and safety boundaries are enforced in application code.</p><label class="sr-only" for="system-prompt">System prompt</label><textarea id="system-prompt" rows="8" maxlength="16000" class="code-input"></textarea></div>
+      <div class="settings-section"><h3>Investigation depth & budgets</h3><label for="scan-depth">Preset</label><select id="scan-depth"><option value="quick">Quick</option><option value="balanced">Balanced</option><option value="thorough">Thorough</option></select><div class="settings-grid"><label>Folders per run<input id="max-folders" type="number" min="1" max="5000" required></label><label>Samples per round<input id="samples-count" type="number" min="1" max="30" required></label><label>AI calls per run<input id="max-calls" type="number" min="1" max="10000" required></label><label>Time budget (minutes)<input id="time-budget" type="number" min="1" max="1440" required></label><label>Read budget (MiB)<input id="read-budget" type="number" min="1" max="2048" required></label><label>AI request timeout (seconds)<input id="request-timeout" type="number" min="10" max="600" required></label></div><p class="hint">Up to two sampling rounds per folder. Resuming grants a new run budget; the investigation retains its saved prompt and model.</p></div>
+      <div class="settings-section"><h3>Filters & content</h3><label class="checkbox-label"><input id="hide-technical" type="checkbox"> Group recognized technical files in the report</label><label class="checkbox-label"><input id="analyze-images" type="checkbox"> Send image samples to the local vision model</label><p class="hint">Without image analysis, only image metadata is reviewed. PDF and Office excerpts are limited; unreadable content is identified.</p><label for="exclude-patterns">Exclusion patterns · one per line</label><textarea id="exclude-patterns" rows="4" placeholder=".Trashes&#10;*.tmp"></textarea><p class="hint">Excluded paths are logged, but their contents are not inventoried. Patterns match names and relative paths.</p></div>
+    </div>
+    <div class="dialog-footer"><span id="settings-status" role="status">Changes apply to new investigations.</span><button type="submit" class="primary" id="save-settings">Save settings</button></div>
+  </form>
+</dialog>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+</body></html>

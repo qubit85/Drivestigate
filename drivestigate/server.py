@@ -1,0 +1,360 @@
+"""Authenticated loopback HTTP application; no arbitrary source-file serving."""
+
+import argparse
+import hmac
+import http.client
+import json
+import os
+import secrets
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import webbrowser
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+from . import __version__
+from .config import DEFAULTS, DEPTHS
+from .engine import Engine
+from .llm import Ollama
+from .reports import csv_report, html_report, json_report
+from .store import Store
+
+STATIC = Path(__file__).parent / "static"
+MAX_BODY = 128 * 1024
+
+
+class AppServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address, store, engine=None):
+        super().__init__(address, Handler)
+        self.store = store
+        self.engine = engine or Engine(store)
+        self.token = secrets.token_urlsafe(32)
+        self.origin = f"http://127.0.0.1:{self.server_port}"
+        self.stats_cache = {}
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "Drivestigate/" + __version__
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(20)
+
+    def log_message(self, fmt, *args):
+        # Request paths can contain search terms; do not persist them in logs.
+        pass
+
+    def security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' "
+            "'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+            "base-uri 'none'; form-action 'self'; object-src 'none'",
+        )
+
+    def reply(self, data, status=200, mime="application/json; charset=utf-8", cookie=False):
+        if not isinstance(data, (str, bytes)):
+            data = json.dumps(data, ensure_ascii=True)
+        body = data.encode("utf-8") if isinstance(data, str) else data
+        self.send_response(status)
+        self.security_headers()
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(body)))
+        if cookie:
+            self.send_header(
+                "Set-Cookie", f"dv_session={self.server.token}; Path=/; HttpOnly; SameSite=Strict"
+            )
+        self.end_headers()
+        self.wfile.write(body)
+
+    def authorized(self, write=False):
+        port = self.server.server_port
+        if self.headers.get("Host") not in {f"127.0.0.1:{port}", f"localhost:{port}"}:
+            return False
+        origin = self.headers.get("Origin")
+        if origin and origin not in {self.server.origin, f"http://localhost:{port}"}:
+            return False
+        if self.headers.get("Sec-Fetch-Site") == "cross-site":
+            return False
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get("Cookie", ""))
+            token = cookie["dv_session"].value if "dv_session" in cookie else ""
+            return hmac.compare_digest(token, self.server.token) and (
+                not write
+                or hmac.compare_digest(self.headers.get("X-Drivestigate-Token", ""), self.server.token)
+            )
+        except (ValueError, TypeError):
+            return False
+
+    def do_GET(self):
+        try:
+            parts = urlsplit(self.path)
+            path = parts.path
+            port = self.server.server_port
+            if self.headers.get("Host") not in {f"127.0.0.1:{port}", f"localhost:{port}"}:
+                return self.reply({"error": "Invalid host."}, 403)
+            if path in {"/", "/app.js", "/style.css", "/icon.svg"}:
+                if self.headers.get("Sec-Fetch-Dest") in {"iframe", "frame"}:
+                    return self.reply({"error": "Embedding is not allowed."}, 403)
+                filename = {"/": "index.html"}.get(path, path[1:])
+                mime = {
+                    "/": "text/html",
+                    "/app.js": "text/javascript",
+                    "/style.css": "text/css",
+                    "/icon.svg": "image/svg+xml",
+                }[path]
+                body = (STATIC / filename).read_text().replace("__CSRF_TOKEN__", self.server.token)
+                return self.reply(body, mime=mime + "; charset=utf-8", cookie=path == "/")
+            if not self.authorized():
+                return self.reply({"error": "Please open Drivestigate in your local browser."}, 403)
+            query = parse_qs(parts.query)
+            store, engine = self.server.store, self.server.engine
+            if path == "/api/settings":
+                return self.reply({"settings": store.settings(), "defaults": DEFAULTS, "depths": DEPTHS})
+            if path == "/api/models":
+                return self.reply({"models": Ollama(store.settings()).models()})
+            if path == "/api/volumes":
+                roots = []
+                if sys.platform == "darwin":
+                    for volume in Path("/Volumes").iterdir():
+                        try:
+                            info = os.statvfs(volume)
+                            roots.append(
+                                {
+                                    "name": volume.name,
+                                    "path": str(volume.resolve()),
+                                    "bytes": info.f_blocks * info.f_frsize,
+                                }
+                            )
+                        except OSError:
+                            pass
+                return self.reply({"volumes": roots})
+            if path == "/api/scans":
+                return self.reply({"scans": store.scans(), "version": __version__})
+            segments = path.strip("/").split("/")
+            if len(segments) >= 3 and segments[:2] == ["api", "scans"]:
+                scan_id = segments[2]
+                scan = store.get_scan(scan_id)
+                if len(segments) == 3:
+                    cached = self.server.stats_cache.get(scan_id)
+                    if not cached or time.monotonic() - cached[0] > 3 or cached[1] != scan["updated"]:
+                        cached = (time.monotonic(), scan["updated"], store.stats(scan_id))
+                        self.server.stats_cache[scan_id] = cached
+                    return self.reply({"scan": scan, "stats": cached[2], "connected": engine.connected(scan)})
+                if segments[3] == "findings":
+                    return self.reply(
+                        store.findings(
+                            scan_id,
+                            max(0, int(query.get("offset", [0])[0])),
+                            min(250, max(1, int(query.get("limit", [50])[0]))),
+                            query.get("q", [""])[0][:200],
+                            query.get("priority", [None])[0],
+                        )
+                    )
+                if segments[3] == "finding" and len(segments) == 5:
+                    finding_id = int(segments[4])
+                    with store.connect() as db:
+                        row = db.execute(
+                            "SELECT f.*,d.rel,(SELECT COUNT(*) FROM files x WHERE x.dir_id=d.id) "
+                            "file_count,(SELECT COALESCE(SUM(size),0) FROM files x WHERE x.dir_id=d.id) "
+                            "bytes FROM findings f JOIN directories d ON d.id=f.dir_id "
+                            "WHERE f.id=? AND f.scan_id=?",
+                            (finding_id, scan_id),
+                        ).fetchone()
+                    if not row:
+                        raise ValueError("Finding not found.")
+                    finding = dict(row)
+                    finding["samples"] = json.loads(finding["samples"])
+                    finding["references"] = json.loads(finding.pop("references_json"))
+                    return self.reply(finding)
+                if segments[3] == "events":
+                    return self.reply({"events": store.events(scan_id, 250)})
+                if segments[3] in {"report.html", "report.csv", "report.json"}:
+                    typ = segments[3].split(".")[-1]
+                    with store.snapshot() as snapshot:
+                        return self.export_report(snapshot, scan_id, typ)
+
+            self.reply({"error": "Not found."}, 404)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except (ValueError, OSError, KeyError, TypeError, OverflowError) as exc:
+            self.reply({"error": str(exc)[:500]}, 400)
+
+    def export_report(self, store, scan_id, typ):
+        iterator = (
+            html_report(store, scan_id, self.server.origin)
+            if typ == "html"
+            else csv_report(store, scan_id)
+            if typ == "csv"
+            else json_report(store, scan_id)
+        )
+        self.send_response(200)
+        self.security_headers()
+        self.send_header(
+            "Content-Type",
+            {"html": "text/html", "csv": "text/csv", "json": "application/json"}[typ] + "; charset=utf-8",
+        )
+        self.send_header("Content-Disposition", f'attachment; filename="Drivestigate-{scan_id[:8]}.{typ}"')
+        self.end_headers()
+        for chunk in iterator:
+            self.wfile.write(chunk.encode("utf-8"))
+        return
+
+    def do_POST(self):
+        if not self.authorized(write=True):
+            return self.reply({"error": "Invalid local session."}, 403)
+        try:
+            if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                return self.reply({"error": "JSON is required."}, 415)
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= MAX_BODY:
+                return self.reply({"error": "Request is empty or too large."}, 413)
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("A JSON object is required.")
+            store, engine = self.server.store, self.server.engine
+            path = urlsplit(self.path).path
+            if path == "/api/settings":
+                return self.reply({"settings": store.save_settings(data)})
+            if path == "/api/model-test":
+                return self.reply(Ollama(data.get("settings", store.settings())).test())
+            if path == "/api/models":
+                return self.reply({"models": Ollama(data.get("settings", store.settings())).models()})
+            if path == "/api/pick-folder":
+                if sys.platform != "darwin":
+                    raise ValueError("The folder picker requires macOS. Enter a path instead.")
+                result = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        "POSIX path of (choose folder with prompt "
+                        '"Choose a drive or folder for Drivestigate")',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                return self.reply({"path": result.stdout.strip() if result.returncode == 0 else ""})
+            if path == "/api/demo":
+                from .demo import create_demo
+
+                folder = Path(tempfile.mkdtemp(prefix="Drivestigate-Demo-"))
+                create_demo(folder)
+                return self.reply({"path": str(folder)})
+            if path == "/api/scans":
+                scan_id = engine.create(
+                    str(data.get("root", "")), str(data.get("name", "")), store.settings()
+                )
+                return self.reply({"id": scan_id}, 201)
+            segments = path.strip("/").split("/")
+            if len(segments) == 4 and segments[:2] == ["api", "scans"]:
+                scan_id, action = segments[2:]
+                if action in {"pause", "stop"}:
+                    engine.interrupt(scan_id, stop=action == "stop")
+                elif action == "resume":
+                    engine.start(scan_id)
+                elif action == "deepen":
+                    engine.start(scan_id, finding_id=int(data["finding_id"]))
+                elif action == "reveal":
+                    target = engine.path_for(scan_id, data["kind"], int(data["id"]))
+                    if sys.platform != "darwin":
+                        raise ValueError("Finder integration requires macOS. Copy the path instead.")
+                    command = ["/usr/bin/open"] + (["-R"] if data["kind"] == "file" else []) + ["--", target]
+                    result = subprocess.run(command, capture_output=True, timeout=10)
+                    if result.returncode:
+                        raise ValueError("Finder could not open the path.")
+                else:
+                    return self.reply({"error": "Action not found."}, 404)
+                return self.reply({"ok": True})
+            return self.reply({"error": "Not found."}, 404)
+        except (ValueError, KeyError, OSError, TypeError, OverflowError, subprocess.TimeoutExpired) as exc:
+            self.reply({"error": str(exc)[:500]}, 400)
+
+
+def default_data_dir():
+    if os.environ.get("DRIVESTIGATE_DATA_DIR"):
+        return Path(os.environ["DRIVESTIGATE_DATA_DIR"]).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Application Support/Drivestigate"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "drivestigate"
+
+
+def running_instance(port):
+    if not port:
+        return False
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+    try:
+        connection.request("GET", "/")
+        response = connection.getresponse()
+        return (
+            response.status == 200
+            and response.getheader("Server", "").startswith("Drivestigate/")
+            and b"drivestigate-token" in response.read(4096)
+        )
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Drivestigate — local drive investigation")
+    parser.add_argument("--port", type=int, default=8741)
+    parser.add_argument("--data-dir", type=Path, default=default_data_dir())
+    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--version", action="version", version=__version__)
+    args = parser.parse_args()
+    os.umask(0o077)
+    if running_instance(args.port):
+        if not args.no_browser:
+            webbrowser.open(f"http://127.0.0.1:{args.port}")
+        print(f"Drivestigate is already running at http://127.0.0.1:{args.port}", flush=True)
+        return
+    args.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    instance_lock = (args.data_dir / "instance.lock").open("a")
+    try:
+        import fcntl
+
+        fcntl.flock(instance_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        parser.exit(1, "Drivestigate is already using this catalog. Open the existing instance.\n")
+    except ImportError:
+        parser.exit(1, "This release supports macOS and Linux.\n")
+    try:
+        server = AppServer(("127.0.0.1", args.port), Store(args.data_dir / "catalog.sqlite3"))
+    except OSError as exc:
+        parser.exit(1, f"Drivestigate could not start: {exc}\n")
+    print(
+        f"Drivestigate {__version__} · {server.origin}\nCatalog: {args.data_dir}\nCtrl+C stops the application.",
+        flush=True,
+    )
+    if not args.no_browser:
+        webbrowser.open(server.origin)
+
+    def shutdown(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, shutdown)
+    try:
+        server.serve_forever(poll_interval=0.3)
+    except KeyboardInterrupt:
+        if server.engine.thread and server.engine.thread.is_alive():
+            server.engine.interrupt(server.engine.active_id)
+            server.engine.thread.join(timeout=3)
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
