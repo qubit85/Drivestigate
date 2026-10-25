@@ -22,6 +22,9 @@ def safe_cell(value):
 
 
 def csv_report(store, scan_id):
+    if store.get_scan(scan_id)["settings"].get("investigation_mode") == "detail":
+        yield from detail_csv(store, scan_id)
+        return
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     yield "\ufeff"
@@ -51,6 +54,18 @@ def json_report(store, scan_id):
     for finding in all_findings(store, scan_id):
         yield ("" if first else ",") + json.dumps(finding, ensure_ascii=True)
         first = False
+    yield '],"file_details":['
+    if store.get_scan(scan_id)["settings"].get("investigation_mode") == "detail":
+        first = True
+        with store.connect() as db:
+            for row in db.execute(
+                "SELECT f.rel,f.name,f.size,x.* FROM files f JOIN file_details x ON x.file_id=f.id WHERE f.scan_id=? ORDER BY f.id",
+                (scan_id,),
+            ):
+                record = dict(row)
+                record["topics"] = json.loads(record["topics"])
+                yield ("" if first else ",") + json.dumps(record, ensure_ascii=True)
+                first = False
     yield "]}"
 
 
@@ -69,12 +84,22 @@ pre{{white-space:pre-wrap;overflow-wrap:anywhere}}@media print{{body{{background
 <h1>Drivestigate</h1><p>Investigate your drives. Rediscover what matters.</p>
 <section><h2>{esc(scan["name"])}</h2><code>{esc(scan["root"])}</code><p>Status: {esc(scan["status"])} ·
 {stats["files"]} files · {stats["bytes"]} Bytes · {stats["technical_files"]} technical files grouped</p>
-<p>{stats["analyzed_folders"]} of {stats["findings"]} folders assessed by AI;
+<p>{stats["analyzed_folders"]} of {stats["findings"]} folders with completed assessments;
 {stats["samples"]} samples, including {stats["content_samples"]} text/archive excerpts.
 Inventory: {stats["inventoried_dirs"]} of {stats["directories"]} discovered folders.</p>
 <p>Sampling is not an exhaustive content review. Technical classification is not permission to delete.
 Read errors, exclusions, unsupported formats, and disconnected drives limit coverage.</p>
 <p>Finding links open the finding in the running local application, where Finder actions are available.</p></section>"""
+    if scan["settings"].get("investigation_mode") == "detail":
+        detail = stats["detail"]
+        yield f"<section><h2>All-file coverage</h2><p>{detail['processed']} files processed; {detail['hashed']} full-byte fingerprints; {detail['ai_reviewed']} AI assessments; {detail['errors']} read issues.</p><p>Semantic review uses bounded supported content or metadata. Fingerprints cover bytes, not meaning.</p></section>"
+        with store.connect() as db:
+            for row in db.execute(
+                "SELECT f.id,f.rel,x.* FROM files f JOIN file_details x ON x.file_id=f.id WHERE f.scan_id=? ORDER BY f.id",
+                (scan_id,),
+            ):
+                target = f"{origin}/?scan={scan_id}&file={row['file_id']}"
+                yield f"<article><h2><a href='{esc(target)}'>{esc(row['rel'])}</a></h2><p>{esc(row['summary'])}</p><p>{esc(row['reason'])}</p><small>{esc(row['state'])} · Content: {esc(row['content_status'])}</small><p>SHA-256: <code>{esc(row['sha256'])}</code></p><p>{esc(row['error'])}</p></article>"
     for finding in all_findings(store, scan_id):
         link = f"{origin}/?scan={scan_id}&finding={finding['id']}"
         yield (
@@ -99,3 +124,49 @@ Read errors, exclusions, unsupported formats, and disconnected drives limit cove
         ):
             yield f"<p><b>{esc(event['kind'])}</b> · <code>{esc(event['rel'])}</code>: {esc(event['message'])}</p>"
     yield "</section></html>"
+
+
+def detail_csv(store, scan_id):
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    yield "\ufeff"
+    writer.writerow(
+        [
+            "Path",
+            "Size bytes",
+            "State",
+            "Content coverage",
+            "SHA-256",
+            "Priority",
+            "Summary",
+            "Reason",
+            "Topics",
+            "Error",
+        ]
+    )
+    yield buffer.getvalue()
+    with store.connect() as db:
+        for row in db.execute(
+            "SELECT f.rel,f.size,x.* FROM files f JOIN file_details x ON x.file_id=f.id WHERE f.scan_id=? ORDER BY f.id",
+            (scan_id,),
+        ):
+            buffer.seek(0)
+            buffer.truncate()
+            writer.writerow(
+                [
+                    safe_cell(row[k])
+                    for k in (
+                        "rel",
+                        "size",
+                        "state",
+                        "content_status",
+                        "sha256",
+                        "priority",
+                        "summary",
+                        "reason",
+                        "topics",
+                        "error",
+                    )
+                ]
+            )
+            yield buffer.getvalue()

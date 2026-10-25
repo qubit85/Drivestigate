@@ -45,6 +45,9 @@ DEFAULTS = {
     "exclude_patterns": [".Spotlight-V100", ".fseventsd", ".Trashes", "$RECYCLE.BIN"],
     "hide_technical": True,
     "analyze_images": False,
+    "investigation_mode": "overview",
+    "detail_use_llm": True,
+    "vault_include_excerpts": False,
     "profiles": [],
 }
 
@@ -80,6 +83,8 @@ def validate_settings(data):
         raise ValueError("Please select a model.")
     if not isinstance(result["depth"], str) or result["depth"] not in DEPTHS:
         raise ValueError("Unknown investigation depth.")
+    if result["investigation_mode"] not in ("overview", "detail"):
+        raise ValueError("Unknown investigation mode.")
     for key, low, high in (
         ("max_folders", 1, 5000),
         ("samples_per_folder", 1, 30),
@@ -98,7 +103,7 @@ def validate_settings(data):
         or any(not isinstance(p, str) or not p or len(p) > 300 for p in patterns)
     ):
         raise ValueError("At most 100 valid exclusion patterns are allowed.")
-    for key in ("hide_technical", "analyze_images"):
+    for key in ("hide_technical", "analyze_images", "detail_use_llm", "vault_include_excerpts"):
         if not isinstance(result[key], bool):
             raise ValueError(f"{key} must be a boolean.")
     profiles = result["profiles"]

@@ -6,7 +6,7 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .config import DEFAULTS, validate_settings
 
@@ -51,7 +51,17 @@ CREATE TABLE IF NOT EXISTS events (
  id INTEGER PRIMARY KEY, scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
  created TEXT NOT NULL, kind TEXT NOT NULL, rel TEXT NOT NULL, message TEXT NOT NULL
 );
-PRAGMA user_version=1;
+CREATE TABLE IF NOT EXISTS scheduler (id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL DEFAULT 0);
+INSERT OR IGNORE INTO scheduler VALUES(1,0);
+CREATE TABLE IF NOT EXISTS file_details (
+ file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+ state TEXT NOT NULL DEFAULT 'pending', sha256 TEXT NOT NULL DEFAULT '',
+ content_status TEXT NOT NULL DEFAULT 'pending', summary TEXT NOT NULL DEFAULT '',
+ reason TEXT NOT NULL DEFAULT '', topics TEXT NOT NULL DEFAULT '[]',
+ excerpt TEXT NOT NULL DEFAULT '', priority INTEGER NOT NULL DEFAULT 2,
+ error TEXT NOT NULL DEFAULT '', duration REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS detail_hash ON file_details(sha256);
 """
 
 
@@ -62,13 +72,40 @@ class Store:
         self.lock = threading.RLock()
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise RuntimeError("This catalog was created by a newer version of Drivestigate.")
             db.executescript(SCHEMA)
+            scan_columns = {r[1] for r in db.execute("PRAGMA table_info(scans)")}
+            for name, definition in {
+                "queue_order": "INTEGER",
+                "queued_finding": "INTEGER",
+                "progress": "TEXT NOT NULL DEFAULT '{}'",
+                "vault_path": "TEXT NOT NULL DEFAULT ''",
+            }.items():
+                if name not in scan_columns:
+                    db.execute(f"ALTER TABLE scans ADD COLUMN {name} {definition}")
+            dir_columns = {r[1] for r in db.execute("PRAGMA table_info(directories)")}
+            if "parent_rel" not in dir_columns:
+                db.execute("ALTER TABLE directories ADD COLUMN parent_rel TEXT NOT NULL DEFAULT ''")
+                rows = db.execute("SELECT id,rel FROM directories").fetchall()
+                db.executemany(
+                    "UPDATE directories SET parent_rel=? WHERE id=?",
+                    [(str(PurePosixPath(r[1]).parent) if r[1] != "." else "", r[0]) for r in rows],
+                )
+            needs_rollup = "tree_files" not in dir_columns
+            for name in ("tree_files", "tree_bytes"):
+                if name not in dir_columns:
+                    db.execute(f"ALTER TABLE directories ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+            db.execute("CREATE INDEX IF NOT EXISTS dirs_parent ON directories(scan_id,parent_rel)")
+            db.execute("PRAGMA user_version=2")
             db.execute(
                 "UPDATE scans SET status='paused',message='Resume after restarting.' "
                 "WHERE status IN ('running','pausing','stopping')"
             )
+        if needs_rollup:
+            for scan in self.scans():
+                if scan["phase"] != "inventory":
+                    self.rollup(scan["id"])
         Path(path).chmod(0o600)
 
     @contextmanager
@@ -122,13 +159,28 @@ class Store:
             raise ValueError("Investigation not found.")
         result = dict(row)
         result["settings"] = json.loads(result["settings"])
+        result["progress"] = json.loads(result["progress"])
         return result
 
     def update(self, scan_id, **values):
-        allowed = {"status", "phase", "message", "llm_calls", "read_bytes", "elapsed", "device"}
+        allowed = {
+            "status",
+            "phase",
+            "message",
+            "llm_calls",
+            "read_bytes",
+            "elapsed",
+            "device",
+            "queue_order",
+            "queued_finding",
+            "progress",
+            "vault_path",
+        }
         if set(values) - allowed:
             raise ValueError("Unknown scan field")
         values["updated"] = now()
+        if isinstance(values.get("progress"), dict):
+            values["progress"] = json.dumps(values["progress"])
         with self.connect() as db:
             db.execute(
                 f"UPDATE scans SET {','.join(k + '=?' for k in values)} WHERE id=?",
@@ -147,7 +199,9 @@ class Store:
             return [
                 dict(r)
                 for r in db.execute(
-                    "SELECT id,name,root,created,updated,status,phase,message FROM scans ORDER BY created DESC"
+                    "SELECT id,name,root,created,updated,status,phase,message,queue_order,"
+                    "COALESCE(json_extract(settings,'$.investigation_mode'),'overview') mode "
+                    "FROM scans ORDER BY created DESC"
                 )
             ]
 
@@ -202,7 +256,106 @@ class Store:
                     (scan_id,),
                 )
             ]
+            row["detail"] = dict(
+                db.execute(
+                    "SELECT COUNT(*) attempted,COALESCE(SUM(x.sha256!=''),0) hashed,"
+                    "COALESCE(SUM(x.state IN ('reviewed','metadata','error')),0) processed,"
+                    "COALESCE(SUM(x.state='reviewed'),0) ai_reviewed,"
+                    "COALESCE(SUM(x.content_status IN ('excerpt','image')),0) content_read,"
+                    "COALESCE(SUM(x.state='error' OR x.error!=''),0) errors FROM file_details x JOIN files f ON f.id=x.file_id "
+                    "WHERE f.scan_id=?",
+                    (scan_id,),
+                ).fetchone()
+            )
+            row["detail"]["duplicate_groups"] = db.execute(
+                "SELECT COUNT(*) FROM (SELECT x.sha256 FROM file_details x JOIN files f ON f.id=x.file_id "
+                "WHERE f.scan_id=? AND x.sha256!='' GROUP BY x.sha256 HAVING COUNT(*)>1)",
+                (scan_id,),
+            ).fetchone()[0]
         return row
+
+    def queue(self):
+        with self.connect() as db:
+            paused = bool(db.execute("SELECT paused FROM scheduler WHERE id=1").fetchone()[0])
+            jobs = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT id,name,root,status,phase,queue_order,queued_finding,message,"
+                    "COALESCE(json_extract(settings,'$.investigation_mode'),'overview') mode "
+                    "FROM scans WHERE status IN ('queued','waiting','running','pausing','stopping') "
+                    "ORDER BY CASE WHEN status IN ('running','pausing','stopping') THEN 0 ELSE 1 END,queue_order,created"
+                )
+            ]
+        return {"paused": paused, "jobs": jobs}
+
+    def rollup(self, scan_id):
+        with self.connect() as db:
+            rows = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT d.id,d.rel,d.parent_rel,COUNT(f.id) files,COALESCE(SUM(f.size),0) bytes "
+                    "FROM directories d LEFT JOIN files f ON f.dir_id=d.id WHERE d.scan_id=? GROUP BY d.id",
+                    (scan_id,),
+                )
+            ]
+            mapping = {r["rel"]: r for r in rows}
+            for row in sorted(rows, key=lambda r: r["rel"].count("/") + (r["rel"] != "."), reverse=True):
+                parent = mapping.get(row["parent_rel"])
+                if parent:
+                    parent["files"] += row["files"]
+                    parent["bytes"] += row["bytes"]
+            db.executemany(
+                "UPDATE directories SET tree_files=?,tree_bytes=? WHERE id=?",
+                [(r["files"], r["bytes"], r["id"]) for r in rows],
+            )
+
+    def tree(self, scan_id, parent=".", offset=0, limit=150):
+        with self.connect() as db:
+            base = db.execute(
+                "SELECT id FROM directories WHERE scan_id=? AND rel=?", (scan_id, parent)
+            ).fetchone()
+            if not base:
+                raise ValueError("Folder not found in this investigation.")
+            total = db.execute(
+                "SELECT COUNT(*) FROM directories WHERE scan_id=? AND parent_rel=?", (scan_id, parent)
+            ).fetchone()[0]
+            rows = db.execute(
+                "SELECT d.*,a.id finding_id,a.analyzed,COUNT(f.id) own_files,COALESCE(SUM(f.size),0) own_bytes,"
+                "COALESCE(SUM(f.technical),0) technical_files,"
+                "COALESCE(SUM(x.state IN ('reviewed','metadata','error')),0) processed_files,"
+                "COALESCE(SUM(x.state='error' OR x.error!=''),0) + "
+                "(SELECT COUNT(*) FROM events e WHERE e.scan_id=d.scan_id AND e.rel=d.rel AND e.kind='unreadable') errors,"
+                "(SELECT COUNT(*) FROM directories c WHERE c.scan_id=d.scan_id AND c.parent_rel=d.rel) children "
+                "FROM directories d LEFT JOIN files f ON f.dir_id=d.id LEFT JOIN file_details x ON x.file_id=f.id "
+                "LEFT JOIN findings a ON a.dir_id=d.id WHERE d.scan_id=? AND (d.id=? OR d.id IN "
+                "(SELECT id FROM directories WHERE scan_id=? AND parent_rel=? "
+                "ORDER BY rel COLLATE NOCASE LIMIT ? OFFSET ?)) "
+                "GROUP BY d.id ORDER BY (d.rel=?) DESC,d.rel COLLATE NOCASE",
+                (scan_id, base[0], scan_id, parent, limit, offset, parent),
+            ).fetchall()
+            files = [
+                dict(r)
+                for r in db.execute(
+                    "SELECT f.id,f.name,f.rel,f.size,x.state,x.content_status FROM files f "
+                    "LEFT JOIN file_details x ON x.file_id=f.id WHERE f.dir_id=? ORDER BY f.size DESC,f.name LIMIT 80",
+                    (base[0],),
+                )
+            ]
+        return {"parent": parent, "total": total, "items": [dict(r) for r in rows], "files": files}
+
+    def detail_file(self, scan_id, file_id):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT f.*,x.state,x.sha256,x.content_status,x.summary,x.reason,x.topics,x.excerpt,"
+                "x.error,x.priority FROM files f LEFT JOIN file_details x ON x.file_id=f.id "
+                "WHERE f.scan_id=? AND f.id=?",
+                (scan_id, file_id),
+            ).fetchone()
+        if not row:
+            raise ValueError("File not found in this investigation.")
+        result = dict(row)
+        result["topics"] = json.loads(result["topics"] or "[]")
+        return result
 
     def findings(self, scan_id, offset=0, limit=100, query="", priority=None):
         where, args = "f.scan_id=?", [scan_id]

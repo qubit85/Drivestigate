@@ -5,10 +5,10 @@ const token = document.querySelector('meta[name="drivestigate-token"]').content;
 const state = {settings: null, defaults: null, depths: null, scans: [], selected: null, scan: null,
   connected: false, offset: 0, query: "", priority: "", view: "overview", profiles: [], polling: false};
 const statusNames = {running: "Running", paused: "Paused", completed: "Run complete", stopped: "Stopped",
-  pausing: "Pausing", stopping: "Stopping"};
+  pausing: "Pausing", stopping: "Stopping", queued: "Queued", waiting: "Waiting for drive"};
 const depthNames = {quick: "Quick", balanced: "Balanced", thorough: "Thorough"};
 const methodNames = {metadata: "Metadata · awaiting AI review", metadata_ai: "AI assessment based on metadata",
-  sampled: "AI assessment with samples"};
+  sampled: "AI assessment with samples", detail: "All-file inspection ledger"};
 const sampleNames = {excerpt: "Text / archive excerpt", metadata: "Metadata only", image: "Image sample", error: "Unreadable"};
 const eventNames = {excluded: "Excluded", symlink: "Symbolic link", mount: "Different filesystem",
   unreadable: "Unreadable", extraction: "Read error", llm: "AI error", error: "Error", special: "Special file"};
@@ -61,7 +61,12 @@ function switchView(view) {
 }
 async function loadScans() {
   const data = await api("/api/scans");
+  if (state.scansLoaded && state.sidebarSelection === state.selected && JSON.stringify(data.scans) === JSON.stringify(state.scans)) {
+    if (window.DriveViews) await window.DriveViews.refreshQueue();
+    return;
+  }
   state.scans = data.scans;
+  state.scansLoaded = true; state.sidebarSelection = state.selected;
   $("version").textContent = data.version;
   $("scan-count").textContent = data.scans.length;
   $("overview-count").textContent = `${data.scans.length} saved`;
@@ -81,6 +86,7 @@ async function loadScans() {
     empty.append(el("h3", "", "Your first discovery is waiting."), el("p", "", "Connect a drive or try Drivestigate with synthetic demo data."),
       button("New investigation ↗", "text-button", newScan)); cards.append(empty);
   }
+  if (window.DriveViews) await window.DriveViews.refreshQueue();
 }
 async function checkConnection() {
   try {
@@ -110,8 +116,10 @@ async function newScan() {
 }
 async function showReport(id) {
   state.selected = id; state.offset = 0; state.query = ""; state.priority = "";
+  state.scan = null;
   $("finding-search").value = ""; $("priority-filter").value = "";
   switchView("report");
+  if (window.DriveViews) window.DriveViews.reset(id);
   history.replaceState(null, "", `/?scan=${encodeURIComponent(id)}`);
   await refreshReport(); await loadScans();
 }
@@ -120,17 +128,19 @@ async function refreshReport() {
   if (!id) return;
   const data = await api(`/api/scans/${id}`);
   if (id !== state.selected) return;
+  if (state.scan?.id === id && data.scan.updated === state.scan.updated && data.connected === state.connected && !["running", "pausing", "stopping"].includes(data.scan.status)) return;
   state.scan = data.scan; state.connected = data.connected;
   const scan = data.scan, stats = data.stats;
   $("report-title").textContent = scan.name; $("report-root").textContent = scan.root;
   $("scan-status-text").textContent = scan.message || "Ready";
   $("scan-state").textContent = statusNames[scan.status] || scan.status;
   const running = ["running", "pausing", "stopping"].includes(scan.status);
+  const queued = ["queued", "waiting"].includes(scan.status);
   $("scan-status").classList.toggle("running", running);
-  $("pause-scan").hidden = !running; $("stop-scan").hidden = !running;
-  $("pause-scan").disabled = scan.status !== "running"; $("stop-scan").disabled = scan.status !== "running";
-  $("resume-scan").hidden = running;
-  $("resume-scan").textContent = scan.status === "completed" ? "Investigate remaining folders" : "Resume";
+  $("pause-scan").hidden = !running && !queued; $("stop-scan").hidden = !running && !queued;
+  $("pause-scan").disabled = !queued && scan.status !== "running"; $("stop-scan").disabled = !queued && scan.status !== "running";
+  $("resume-scan").hidden = running || queued;
+  $("resume-scan").textContent = scan.status === "completed" ? scan.settings.investigation_mode === "detail" ? "Rebuild Obsidian vault" : "Investigate remaining folders" : "Resume";
   $("resume-scan").disabled = !data.connected;
   $("disconnected").hidden = data.connected;
   const metrics = $("metrics"); metrics.replaceChildren();
@@ -147,6 +157,7 @@ async function refreshReport() {
   for (const type of stats.types) { const row = el("div", "type-row"); row.append(el("span", "", type.category), el("span", "", `${num(type.count)} files · ${formatBytes(type.bytes)}`)); types.append(row); }
   $("scan-settings").textContent = JSON.stringify(scan.settings, null, 2);
   for (const format of ["html", "csv", "json"]) $("export-" + format).href = `/api/scans/${id}/report.${format}`;
+  if (window.DriveViews) await window.DriveViews.update(data);
   await loadFindings();
   const events = await api(`/api/scans/${id}/events`);
   const target = $("scan-events"); target.replaceChildren();
@@ -172,8 +183,10 @@ function renderFinding(finding) {
   footer.append(el("span", "evidence-tag", `${methodNames[finding.method]} · ${num(finding.file_count)} files · ${formatBytes(finding.bytes)}`));
   const open = button("Open in Finder ↗", "text-button", () => reveal("finding", finding.id)); open.disabled = !state.connected;
   const deeper = button("Investigate further", "text-button", () => guarded(async () => {
+    if (state.scan.settings.investigation_mode === "detail") return window.DriveViews.exploreFolder(finding.rel);
     await api(`/api/scans/${state.selected}/deepen`, {finding_id: finding.id}); toast("Deeper investigation started."); await refreshReport();
   })); deeper.disabled = !state.connected || ["running", "pausing", "stopping"].includes(state.scan.status);
+  if (state.scan.settings.investigation_mode === "detail") { deeper.textContent = "Explore file evidence"; deeper.disabled = false; }
   actions.append(open, button("Copy path", "text-button", () => copyPath(finding.rel)), deeper); footer.append(actions); article.append(footer);
   if (finding.samples.length) {
     const details = el("details", "samples"); details.append(el("summary", "", `${finding.samples.length} samples & evidence`));
@@ -218,7 +231,8 @@ async function loadFindings() {
 const fields = {"ollama_url": "ollama-url", model: "model-select", system_prompt: "system-prompt", search_focus: "search-focus",
   depth: "scan-depth", max_folders: "max-folders", samples_per_folder: "samples-count", max_llm_calls: "max-calls",
   time_budget_minutes: "time-budget", max_read_mb: "read-budget", request_timeout_seconds: "request-timeout",
-  hide_technical: "hide-technical", analyze_images: "analyze-images"};
+  hide_technical: "hide-technical", analyze_images: "analyze-images", detail_use_llm: "detail-use-llm",
+  vault_include_excerpts: "vault-excerpts"};
 function settingsFromForm() {
   const settings = structuredClone(state.settings);
   for (const [key, id] of Object.entries(fields)) {
@@ -276,7 +290,8 @@ $("demo").onclick = () => guarded(async () => {
 $("new-form").onsubmit = event => {
   event.preventDefault(); guarded(async () => {
     $("submit-scan").disabled = true;
-    try { const data = await api("/api/scans", {root: $("scan-root").value, name: $("scan-name").value}); await showReport(data.id); }
+    try { const data = await api("/api/scans", {root: $("scan-root").value, name: $("scan-name").value,
+      mode: document.querySelector('input[name="investigation-mode"]:checked').value}); await showReport(data.id); }
     finally { $("submit-scan").disabled = false; }
   });
 };
@@ -341,7 +356,7 @@ async function init() {
     state.polling = true;
     try {
       if (state.view === "report") await refreshReport();
-      if (state.scans.some(s => ["running", "pausing", "stopping"].includes(s.status))) await loadScans();
+      await loadScans();
     } catch (error) { $("scan-status-text").textContent = "Connection to the application lost. Reload the page after restarting."; }
     finally { state.polling = false; }
   }, 4000);

@@ -21,6 +21,15 @@ SCHEMA = {
     "required": ["summary", "reason", "priority", "needs_more_samples", "next_action", "file_ids"],
     "additionalProperties": False,
 }
+FILE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        k: v for k, v in SCHEMA["properties"].items() if k in ("summary", "reason", "priority", "file_ids")
+    },
+    "required": ["summary", "reason", "priority", "file_ids", "topics"],
+    "additionalProperties": False,
+}
+FILE_SCHEMA["properties"]["topics"] = {"type": "array", "items": {"type": "string"}, "maxItems": 5}
 
 
 class OllamaError(ValueError):
@@ -37,7 +46,7 @@ class Ollama:
         # Never inherit an HTTP proxy for local file excerpts; never follow redirects.
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, req, fp, code, msg, headers, newurl):
-                raise ValueError("Ollama-Weiterleitungen sind nicht erlaubt.")
+                raise ValueError("Ollama redirects are not allowed.")
 
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
@@ -85,6 +94,21 @@ class Ollama:
         return {"ok": True, "model": self.settings["model"], "capabilities": info.get("capabilities", [])}
 
     def analyze(self, evidence, timeout=None):
+        return self._analyze(evidence, SCHEMA, timeout)
+
+    def analyze_file(self, evidence, timeout=None):
+        result = self._analyze(evidence, FILE_SCHEMA, timeout)
+        topics = result.get("topics")
+        if (
+            not isinstance(topics, list)
+            or len(topics) > 5
+            or any(not isinstance(t, str) or not t.strip() or len(t) > 60 for t in topics)
+        ):
+            raise ValueError("Invalid suggested topics in file assessment.")
+        result["topics"] = list(dict.fromkeys(t.strip() for t in topics))
+        return result
+
+    def _analyze(self, evidence, schema, timeout=None):
         evidence = deepcopy(evidence)
         images = []
         for sample in evidence.get("samples", []):
@@ -106,8 +130,17 @@ class Ollama:
                     + self.settings["system_prompt"]
                     + "\n\nOwner's search focus:\n"
                     + self.settings["search_focus"]
+                    + (
+                        "\n\nThis is a SINGLE-FILE assessment. Describe only this file and its supplied evidence. "
+                        "Text mentioning other files is a claim in this file, not proof those files exist. "
+                        "Use wording such as 'The excerpt mentions...' for such claims. Do not describe a "
+                        "whole folder or drive as inspected. Topics must describe evidenced content."
+                        if schema is FILE_SCHEMA
+                        else ""
+                    )
                     + "\n\nJSON schema (all fields required; file_ids must be "
-                    "integers from the supplied samples):\n" + json.dumps(SCHEMA),
+                    "integers from the supplied samples). Topics must be short, evidence-based labels, "
+                    "not invented entities or instructions:\n" + json.dumps(schema),
                 },
                 message,
             ],
@@ -128,7 +161,7 @@ class Ollama:
         else:
             raise ValueError("Sample metadata exceeds the context budget. Reduce samples per round.")
         if self.structured:
-            payload["format"] = SCHEMA
+            payload["format"] = schema
         started = time.monotonic()
         try:
             response = self.request("/api/chat", payload, timeout=timeout)
@@ -151,14 +184,14 @@ class Ollama:
             raise ValueError("The model did not return a valid structured response.") from None
         if not isinstance(result, dict):
             raise ValueError("Invalid AI assessment.")
-        if set(result) != set(SCHEMA["required"]):
+        if set(result) != set(schema["required"]):
             raise ValueError("AI assessment does not match the expected schema.")
-        for key in ("summary", "reason", "next_action"):
+        for key in ("summary", "reason", "next_action") if schema is SCHEMA else ("summary", "reason"):
             if not isinstance(result.get(key), str) or len(result[key]) > 3000:
                 raise ValueError("Incomplete AI assessment.")
         if type(result.get("priority")) is not int or result["priority"] not in (1, 2, 3):
             raise ValueError("Invalid AI priority.")
-        if type(result.get("needs_more_samples")) is not bool:
+        if schema is SCHEMA and type(result.get("needs_more_samples")) is not bool:
             raise ValueError("Invalid sampling decision.")
         ids = result.get("file_ids")
         allowed = {s["id"] for s in evidence.get("samples", [])}

@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import webbrowser
+import zipfile
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,6 +38,7 @@ class AppServer(ThreadingHTTPServer):
         self.engine = engine or Engine(store)
         self.token = secrets.token_urlsafe(32)
         self.origin = f"http://127.0.0.1:{self.server_port}"
+        self.engine.origin = self.origin
         self.stats_cache = {}
 
 
@@ -105,13 +107,14 @@ class Handler(BaseHTTPRequestHandler):
             port = self.server.server_port
             if self.headers.get("Host") not in {f"127.0.0.1:{port}", f"localhost:{port}"}:
                 return self.reply({"error": "Invalid host."}, 403)
-            if path in {"/", "/app.js", "/style.css", "/icon.svg"}:
+            if path in {"/", "/app.js", "/visuals.js", "/style.css", "/icon.svg"}:
                 if self.headers.get("Sec-Fetch-Dest") in {"iframe", "frame"}:
                     return self.reply({"error": "Embedding is not allowed."}, 403)
                 filename = {"/": "index.html"}.get(path, path[1:])
                 mime = {
                     "/": "text/html",
                     "/app.js": "text/javascript",
+                    "/visuals.js": "text/javascript",
                     "/style.css": "text/css",
                     "/icon.svg": "image/svg+xml",
                 }[path]
@@ -143,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply({"volumes": roots})
             if path == "/api/scans":
                 return self.reply({"scans": store.scans(), "version": __version__})
+            if path == "/api/queue":
+                return self.reply(store.queue())
             segments = path.strip("/").split("/")
             if len(segments) >= 3 and segments[:2] == ["api", "scans"]:
                 scan_id = segments[2]
@@ -152,7 +157,67 @@ class Handler(BaseHTTPRequestHandler):
                     if not cached or time.monotonic() - cached[0] > 3 or cached[1] != scan["updated"]:
                         cached = (time.monotonic(), scan["updated"], store.stats(scan_id))
                         self.server.stats_cache[scan_id] = cached
-                    return self.reply({"scan": scan, "stats": cached[2], "connected": engine.connected(scan)})
+                    return self.reply(
+                        {
+                            "scan": scan,
+                            "stats": cached[2],
+                            "connected": engine.connected(scan),
+                            "progress": engine.progress(scan),
+                        }
+                    )
+                if segments[3] == "tree":
+                    return self.reply(
+                        store.tree(
+                            scan_id,
+                            query.get("parent", ["."])[0],
+                            max(0, int(query.get("offset", [0])[0])),
+                            150,
+                        )
+                    )
+                if segments[3] == "graph":
+                    from .knowledge import graph_data
+
+                    return self.reply(
+                        graph_data(
+                            store,
+                            scan_id,
+                            query.get("q", [""])[0],
+                            min(400, max(20, int(query.get("limit", [200])[0]))),
+                            query.get("folder", [None])[0],
+                        )
+                    )
+                if segments[3] == "file" and len(segments) == 5:
+                    return self.reply(store.detail_file(scan_id, int(segments[4])))
+                if segments[3] == "obsidian.zip":
+                    from .knowledge import vault_path
+
+                    root = vault_path(store, scan_id)
+                    with tempfile.TemporaryFile() as archive_stream:
+                        with zipfile.ZipFile(archive_stream, "w", zipfile.ZIP_DEFLATED) as archive:
+                            for entry in root.rglob("*"):
+                                if (
+                                    entry.is_symlink()
+                                    or not entry.is_file()
+                                    or not entry.resolve().is_relative_to(root)
+                                ):
+                                    continue
+                                archive.write(
+                                    entry, "Drivestigate-Vault/" + entry.relative_to(root).as_posix()
+                                )
+                        size = archive_stream.tell()
+                        archive_stream.seek(0)
+                        self.send_response(200)
+                        self.security_headers()
+                        self.send_header("Content-Type", "application/zip")
+                        self.send_header("Content-Length", str(size))
+                        self.send_header(
+                            "Content-Disposition",
+                            f'attachment; filename="Drivestigate-Vault-{scan_id[:8]}.zip"',
+                        )
+                        self.end_headers()
+                        while chunk := archive_stream.read(1024 * 1024):
+                            self.wfile.write(chunk)
+                    return
                 if segments[3] == "findings":
                     return self.reply(
                         store.findings(
@@ -228,6 +293,17 @@ class Handler(BaseHTTPRequestHandler):
             path = urlsplit(self.path).path
             if path == "/api/settings":
                 return self.reply({"settings": store.save_settings(data)})
+            if path == "/api/queue/reorder":
+                engine.reorder(data.get("ids"))
+                return self.reply(store.queue())
+            if path == "/api/queue/move":
+                engine.move(data.get("id"), data.get("direction"))
+                return self.reply(store.queue())
+            if path == "/api/queue/hold":
+                if type(data.get("paused")) is not bool:
+                    raise ValueError("Queue hold state must be a boolean.")
+                engine.hold_queue(data["paused"])
+                return self.reply(store.queue())
             if path == "/api/model-test":
                 return self.reply(Ollama(data.get("settings", store.settings())).test())
             if path == "/api/models":
@@ -254,9 +330,9 @@ class Handler(BaseHTTPRequestHandler):
                 create_demo(folder)
                 return self.reply({"path": str(folder)})
             if path == "/api/scans":
-                scan_id = engine.create(
-                    str(data.get("root", "")), str(data.get("name", "")), store.settings()
-                )
+                settings = store.settings()
+                settings["investigation_mode"] = data.get("mode", settings["investigation_mode"])
+                scan_id = engine.create(str(data.get("root", "")), str(data.get("name", "")), settings)
                 return self.reply({"id": scan_id}, 201)
             segments = path.strip("/").split("/")
             if len(segments) == 4 and segments[:2] == ["api", "scans"]:
@@ -275,6 +351,15 @@ class Handler(BaseHTTPRequestHandler):
                     result = subprocess.run(command, capture_output=True, timeout=10)
                     if result.returncode:
                         raise ValueError("Finder could not open the path.")
+                elif action == "open-vault":
+                    from .knowledge import vault_path
+
+                    root = vault_path(store, scan_id)
+                    if sys.platform != "darwin":
+                        raise ValueError("Open the downloaded vault folder in Obsidian.")
+                    result = subprocess.run(["/usr/bin/open", "--", str(root)], timeout=10)
+                    if result.returncode:
+                        raise ValueError("Finder could not open the vault folder.")
                 else:
                     return self.reply({"error": "Action not found."}, 404)
                 return self.reply({"ok": True})
@@ -342,6 +427,7 @@ def main():
     )
     if not args.no_browser:
         webbrowser.open(server.origin)
+    server.engine.start_scheduler()
 
     def shutdown(signum, frame):
         raise KeyboardInterrupt
@@ -350,9 +436,7 @@ def main():
     try:
         server.serve_forever(poll_interval=0.3)
     except KeyboardInterrupt:
-        if server.engine.thread and server.engine.thread.is_alive():
-            server.engine.interrupt(server.engine.active_id)
-            server.engine.thread.join(timeout=3)
+        server.engine.close()
         server.server_close()
 
 

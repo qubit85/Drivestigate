@@ -84,3 +84,46 @@ def test_report_counters_refresh_after_scan_state_changes(server, tmp_path):
     data = json.loads(request(server, "/api/scans/" + sid)[1])
     assert data["scan"]["status"] == "completed"
     assert data["stats"]["analyzed_folders"] == 1
+
+
+def test_queue_api_validation_and_persistence(server, tmp_path):
+    server.engine = Engine(server.store, FakeOllama)
+    assert request(server, "/api/queue/hold", {"paused": "yes"})[0] == 400
+    assert request(server, "/api/queue/hold", {"paused": True})[0] == 200
+    root = create_demo(tmp_path / "queue-source")
+    ids = [
+        json.loads(request(server, "/api/scans", {"root": str(root), "name": n})[1])["id"] for n in ("A", "B")
+    ]
+    assert request(server, "/api/queue/reorder", {"ids": ids[::-1]})[0] == 200
+    queue = json.loads(request(server, "/api/queue")[1])
+    assert queue["paused"] and [j["id"] for j in queue["jobs"]] == ids[::-1]
+    assert request(server, "/api/queue/reorder", {"ids": ids[:1]})[0] == 400
+    assert request(server, "/api/queue", auth=False)[0] == 403
+
+
+def test_detail_graph_and_vault_routes_are_scoped(server, tmp_path):
+    import io
+    import zipfile
+
+    server.engine = Engine(server.store, FakeOllama)
+    root = create_demo(tmp_path / "detail-source")
+    sid = server.engine.create(
+        root, "Detail", {**DEFAULTS, "investigation_mode": "detail", "detail_use_llm": False}
+    )
+    wait(server.engine)
+    assert server.store.get_scan(sid)["status"] == "completed"
+    tree = json.loads(request(server, f"/api/scans/{sid}/tree")[1])
+    assert tree["items"][0]["rel"] == "."
+    graph = json.loads(request(server, f"/api/scans/{sid}/graph?limit=20")[1])
+    fid = next(n["file_id"] for n in graph["nodes"] if n["kind"] == "file")
+    assert json.loads(request(server, f"/api/scans/{sid}/file/{fid}")[1])["sha256"]
+    assert request(server, f"/api/scans/{sid}/file/-1")[0] == 400
+    assert request(server, "/api/scans/unknown/graph")[0] == 400
+    assert request(server, f"/api/scans/{sid}/tree?parent=../../etc")[0] == 400
+    assert request(server, f"/api/scans/{sid}/obsidian.zip", auth=False)[0] == 403
+    code, body, headers = request(server, f"/api/scans/{sid}/obsidian.zip")
+    assert code == 200 and headers["Content-Type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        assert "Drivestigate-Vault/Investigation.md" in archive.namelist()
+        assert len([p for p in archive.namelist() if p.startswith("Drivestigate-Vault/Files/")]) == 13
+        assert not any(p.endswith(".bin") or "/../" in p for p in archive.namelist())

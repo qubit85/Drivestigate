@@ -68,3 +68,13 @@ def test_malformed_model_output_cannot_become_a_finding(response):
 def test_malformed_settings_produce_validation_errors(field, value):
     with pytest.raises(ValueError):
         validate_settings({field: value})
+
+
+@pytest.mark.parametrize("topics", ["invalid", [1], ["x" * 61], ["a"] * 6])
+def test_detail_topics_require_bounded_text(topics):
+    client = Ollama(DEFAULTS)
+    result = {k: v for k, v in valid_result().items() if k not in ("next_action", "needs_more_samples")}
+    result["topics"] = topics
+    client.request = lambda *a, **kw: {"message": {"content": json.dumps(result)}}
+    with pytest.raises(ValueError):
+        client.analyze_file({"samples": [{"id": 1}]})

@@ -3,8 +3,10 @@
 **Investigate your drives. Rediscover what matters.**
 
 A local macOS application for exploring old hard drives and USB sticks with Ollama.
-It builds a resumable metadata catalog, groups technical clutter, samples potentially
-valuable folders, and produces an evidence-based report with Finder links.
+It builds a resumable metadata catalog, queues investigations, groups technical clutter,
+and produces evidence-based reports with Finder links. A live folder map shows progress.
+All-file detail mode adds full-byte fingerprints, per-file assessments, a visual knowledge
+graph and an exportable Obsidian vault.
 
 ![Drivestigate overview with synthetic demo data](docs/screenshots/overview.png)
 
@@ -41,6 +43,7 @@ web interface bundled. It only needs your local Ollama service at runtime:
 bash scripts/build_macos.sh
 ```
 
+Quit the desktop app before rebuilding; the build script refuses to replace a running bundle.
 The desktop bundle is built for the architecture of the build Mac. Local builds are
 ad-hoc signed; public distribution still requires your Apple Developer identity and
 notarization. Closing the browser does not stop the background desktop app; use Quit
@@ -50,7 +53,8 @@ from its Dock icon. The source launcher remains useful for development and termi
 
 1. Open **Settings**. Select a local model and test the connection. Edit the system
    prompt, add search priorities, save reusable profiles, and choose sampling budgets.
-2. Start **New investigation**. Choose a mounted drive or a folder, or generate a synthetic demo.
+2. Start **New investigation**. Choose a mounted drive or folder, select **Adaptive overview**
+   or **All-file detail + Obsidian vault**, and add it to the queue. The synthetic demo is optional.
 3. Inventory enumerates every accessible directory entry and collects metadata. Excluded
    paths, symlinks, other mounted filesystems, permission errors and unreadable filenames
    are logged. Files are not opened for their contents during inventory.
@@ -63,12 +67,68 @@ from its Dock icon. The source launcher remains useful for development and termi
 6. Export HTML, CSV or JSON. HTML links return to that finding in the running local app,
    where Finder actions are available. Standalone exported HTML does not directly launch Finder.
 
-Only one scan runs at a time. Pause/stop take effect at the next checkpoint; an in-flight
-model request can take up to the configured request timeout. Restarted scans are paused
-and can be resumed. Completed scans with unreviewed folders can also be continued.
+The persistent queue runs one investigation at a time. On **Overview**, drag queued jobs or
+use the up/down buttons to reorder them. **Hold queue** prevents the next job from starting
+while allowing the active job to finish. Remove a queued job to preserve it as paused.
+Disconnected jobs wait without blocking connected drives and are retried automatically.
+After restarting, interrupted active jobs are paused; queued jobs retain their order.
+
+The report shows phase progress, completed/total units, throughput and elapsed time.
+A rough ETA range appears after two completed units in the current processing phase.
+It uses recent unit durations and excludes later phases. Inventory cannot estimate a
+total until discovery finishes; large files and variable model latency can change the ETA.
+The live folder tree distinguishes discovery, metadata inventory, sampling, completed
+processing and read issues. The size map shows up to 24 largest immediate entries;
+expand folders and drill down to inspect their files. Folder status describes own files.
+
+Pause/stop take effect at the next checkpoint; an in-flight
+model request can take up to the configured request timeout. Interrupted scans can be resumed. Completed scans with unreviewed folders can also be continued.
 Prompts, filters, model selection and budgets are snapshotted per scan. To use different
 settings on existing material, create a new scan. Budgets renew on each explicit resume
 or deepen action. Metadata inventory is not limited by the AI time budget.
+
+## All-file detail and the knowledge graph
+
+![Knowledge graph with synthetic file evidence](docs/screenshots/knowledge-graph.png)
+
+**All-file detail + Obsidian vault** attempts every inventoried regular file, including
+technical files. Each accessible unchanged file is read completely for a SHA-256
+fingerprint, then receives a bounded supported content extraction and, by default, one
+local-model assessment with suggested topics. Overview sampling, time and read budgets
+do not truncate detail mode. Pause or stop it when needed. Failed AI requests pause for
+retry after three attempts; completed file work is retained. Files that change or cannot
+be read remain visible with errors. Exclusions and skipped filesystem entries still apply.
+
+A complete fingerprint means every byte was read for hashing. **It does not mean the AI
+understood the whole file.** The supported extraction limits below still apply. Unsupported
+binaries, large PDFs, encrypted documents and other unavailable content receive metadata
+assessments. Separate counters show processed files, full fingerprints, AI assessments,
+readable content samples and errors. Disable per-file AI in Settings for a structural
+all-file pass with fingerprints and an Obsidian vault, without semantic topic links.
+
+Select **Knowledge graph** in a report to explore files, folders, extension-derived types,
+AI-suggested topics and exact duplicate groups. Solid folder/hash links are observed;
+dashed topic links are model suggestions. Click nodes for connections and evidence, drag
+to rearrange, pan and zoom, or use the keyboard and accessible node list. Search narrows
+the graph; the display is capped at 100–400 files for responsiveness. The vault includes
+all inventoried files, independently of that display cap. A graph is useful for connecting
+related material across folders; the folder map remains the clearest completeness view.
+
+After detail mode completes, **Download Obsidian vault** exports the linked notes as ZIP.
+**Open vault folder** opens the generated folder in Finder; open that folder as a vault
+in Obsidian and select Graph view. It contains one note per file and folder, topic/type
+notes, duplicate groups and coverage/issue notes using standard wikilinks. File and folder
+notes have human-readable names with stable IDs so their Obsidian graph labels remain useful. File notes link
+back to their evidence in the running Drivestigate instance. See Obsidian's
+[internal links](https://help.obsidian.md/links) and [Graph view](https://help.obsidian.md/plugins/graph).
+
+Vaults are stored separately under the catalog's `vaults/` directory. Each build creates
+a new folder so user edits to older exports survive. Original files are never copied.
+Source excerpts are omitted by default; opt in under Settings if wanted. File names,
+paths, summaries, topics and hashes are still potentially private. Nothing is imported
+into an existing personal Obsidian vault automatically. HTML, CSV and JSON detail exports
+also include the per-file coverage ledger. **Rebuild Obsidian vault** regenerates notes
+from the saved snapshot; create a new investigation to inspect changed source material.
 
 ## What is actually inspected?
 
@@ -84,7 +144,7 @@ or deepen action. Metadata inventory is not limited by the AI time budget.
 Only excerpts are sent to the model, with additional per-request truncation to keep the
 context manageable. Technical classification uses conservative path/extension rules;
 potential user documents inside application folders remain visible. It is still a heuristic.
-No OCR, recursive archive extraction, malware scan, forensic recovery, deduplication, or
+No OCR, recursive archive extraction, malware scan, forensic recovery, duplicate removal, or
 proof that all important files have been found is implied. Empty folders have inventory
 entries but no content finding. A grouped technical file is **not** a deletion recommendation.
 
@@ -148,10 +208,12 @@ target; core scanning also runs on Linux with manual paths and copied links.
 .venv/bin/ruff format --check .
 .venv/bin/python -m pytest -q
 node --check drivestigate/static/app.js
+node --check drivestigate/static/visuals.js
 ```
 
 Tests use synthetic data and an injected model client. They cover persistence, pause/resume,
 budgets, unchanged source content/mtime, unsafe paths and symlinks, disconnected drives,
-model-output validation, exports, CSRF and session boundaries. GitHub Actions defines
+model-output validation, exports, CSRF and session boundaries. Queue recovery, reordering,
+all-file coverage, fingerprints, graph provenance and Obsidian links are also covered. GitHub Actions defines
 Linux/macOS checks for Python 3.11, 3.12 and 3.14. Live-model and UI acceptance checks are
 documented in [docs/VALIDATION.md](docs/VALIDATION.md).

@@ -195,6 +195,101 @@ class Engine:
         self.lock = threading.RLock()
         self.active_id = None
         self.intent = "paused"
+        self.closing = False
+        self.scheduler_thread = None
+        self.live = {}
+        self.origin = "http://127.0.0.1:8741"
+
+    def start_scheduler(self):
+        if self.scheduler_thread:
+            return
+
+        def schedule():
+            while not self.closing:
+                self.kick()
+                for _ in range(20):
+                    if self.closing:
+                        return
+                    time.sleep(0.25)
+
+        self.scheduler_thread = threading.Thread(target=schedule, daemon=True)
+        self.scheduler_thread.start()
+
+    def close(self):
+        self.closing = True
+        with self.lock:
+            if self.active_id:
+                self.intent = "paused"
+                self.control.set()
+        if self.thread:
+            self.thread.join(timeout=3)
+
+    def kick(self):
+        with self.lock:
+            if self.closing or self.active_id:
+                return
+            with self.store.connect() as db:
+                if db.execute("SELECT paused FROM scheduler WHERE id=1").fetchone()[0]:
+                    return
+                jobs = [
+                    r[0]
+                    for r in db.execute(
+                        "SELECT id FROM scans WHERE status IN ('queued','waiting') "
+                        "ORDER BY queue_order,created"
+                    )
+                ]
+            for scan_id in jobs:
+                scan = self.store.get_scan(scan_id)
+                if not self.connected(scan):
+                    if scan["status"] != "waiting":
+                        self.store.update(
+                            scan_id, status="waiting", message="Waiting for the original drive."
+                        )
+                    continue
+                self.control.clear()
+                self.active_id = scan_id
+                self.live[scan_id] = {
+                    "started": time.monotonic(),
+                    "phase_started": time.monotonic(),
+                    "durations": [],
+                    "baseline": 0,
+                }
+                self.store.update(
+                    scan_id,
+                    device=identity(scan["root"])[0],
+                    status="running",
+                    message="Starting investigation …",
+                )
+                self.thread = threading.Thread(
+                    target=self.run, args=(scan_id, scan["queued_finding"]), daemon=True
+                )
+                self.thread.start()
+                return
+
+    def hold_queue(self, paused):
+        with self.lock, self.store.connect() as db:
+            db.execute("UPDATE scheduler SET paused=? WHERE id=1", (int(paused),))
+        self.kick()
+
+    def reorder(self, ids):
+        if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids):
+            raise ValueError("Queue order must contain investigation IDs.")
+        with self.lock, self.store.connect() as db:
+            expected = {r[0] for r in db.execute("SELECT id FROM scans WHERE status IN ('queued','waiting')")}
+            if len(ids) != len(expected) or set(ids) != expected:
+                raise ValueError("The queue changed. Refresh it and try again.")
+            db.executemany("UPDATE scans SET queue_order=? WHERE id=?", enumerate(ids, start=1))
+
+    def move(self, scan_id, direction):
+        with self.lock:
+            ids = [j["id"] for j in self.store.queue()["jobs"] if j["status"] in ("queued", "waiting")]
+            if scan_id not in ids or direction not in ("up", "down"):
+                raise ValueError("Only queued investigations can be reordered.")
+            index = ids.index(scan_id)
+            target = index + (-1 if direction == "up" else 1)
+            if 0 <= target < len(ids):
+                ids[index], ids[target] = ids[target], ids[index]
+                self.reorder(ids)
 
     def connected(self, scan):
         try:
@@ -212,7 +307,6 @@ class Engine:
 
     def create(self, root, name, settings):
         with self.lock:
-            self.ensure_idle()
             root = Path(root).expanduser().resolve(strict=True)
             if not root.is_dir():
                 raise ValueError("The source must be a folder.")
@@ -244,13 +338,14 @@ class Engine:
             return scan_id
 
     def ensure_idle(self):
-        if self.thread and self.thread.is_alive():
+        if self.active_id:
             raise ValueError("An investigation is already running. Pause it first.")
 
     def start(self, scan_id, finding_id=None):
         with self.lock:
-            self.ensure_idle()
             scan = self.store.get_scan(scan_id)
+            if self.active_id == scan_id:
+                raise ValueError("This investigation is already running.")
             if not self.connected(scan):
                 raise ValueError("The original drive is disconnected or its identity has changed.")
             if finding_id is not None:
@@ -260,19 +355,31 @@ class Engine:
                     ).fetchone()
                 if not row:
                     raise ValueError("Finding not found.")
-            self.control.clear()
-            self.active_id = scan_id
+            with self.store.connect() as db:
+                order = db.execute(
+                    "SELECT COALESCE(MAX(queue_order),0)+1 FROM scans "
+                    "WHERE status IN ('queued','waiting','running','pausing','stopping')"
+                ).fetchone()[0]
             self.store.update(
                 scan_id,
-                device=identity(scan["root"])[0],
-                status="running",
-                message="Resuming investigation …",
+                status="queued",
+                queue_order=scan["queue_order"] if scan["status"] in ("queued", "waiting") else order,
+                queued_finding=finding_id,
+                message="Queued for investigation.",
             )
-            self.thread = threading.Thread(target=self.run, args=(scan_id, finding_id), daemon=True)
-            self.thread.start()
+            self.kick()
 
     def interrupt(self, scan_id, stop=False):
         with self.lock:
+            scan = self.store.get_scan(scan_id)
+            if scan["status"] in ("queued", "waiting"):
+                self.store.update(
+                    scan_id,
+                    status="stopped" if stop else "paused",
+                    queue_order=None,
+                    message="Removed from the queue; progress preserved.",
+                )
+                return
             if self.active_id != scan_id or not self.thread or not self.thread.is_alive():
                 raise ValueError("This investigation is not running.")
             self.intent = "stopped" if stop else "paused"
@@ -298,9 +405,15 @@ class Engine:
             if scan["phase"] == "inventory":
                 self.inventory(scan)
                 self.checkpoint(scan)
+                self.store.rollup(scan_id)
                 self.seed_findings(scan)
                 self.store.update(scan_id, phase="analysis")
-            self.investigate(self.store.get_scan(scan_id), finding_id, time.monotonic())
+            if scan["settings"].get("investigation_mode") == "detail":
+                from .detail import investigate_files
+
+                investigate_files(self, self.store.get_scan(scan_id))
+            else:
+                self.investigate(self.store.get_scan(scan_id), finding_id, time.monotonic())
         except Interrupted:
             self.store.update(scan_id, status=self.intent, message="Investigation paused; progress saved.")
         except Exception as exc:
@@ -309,6 +422,46 @@ class Engine:
         finally:
             current = self.store.get_scan(scan_id)
             self.store.update(scan_id, elapsed=current["elapsed"] + time.monotonic() - started)
+            with self.lock:
+                self.active_id = None
+                self.kick()
+
+    def progress_update(self, scan_id, **values):
+        scan = self.store.get_scan(scan_id)
+        progress = scan["progress"]
+        progress.update(values)
+        self.store.update(scan_id, progress=progress)
+
+    def unit_finished(self, scan_id, duration):
+        live = self.live.get(scan_id)
+        if live is not None:
+            live["durations"] = [*live["durations"][-19:], max(0.001, duration)]
+
+    def progress(self, scan):
+        progress = dict(scan["progress"])
+        live = self.live.get(scan["id"], {})
+        duration = time.monotonic() - live.get("phase_started", time.monotonic())
+        completed, total = progress.get("completed", 0), progress.get("total", 0)
+        progress["percent"] = min(100, 100 * completed / total) if total else None
+        progress["eta_low"] = progress["eta_high"] = None
+        progress["elapsed_seconds"] = scan["elapsed"] + (
+            time.monotonic() - live["started"]
+            if scan["status"] in ("running", "pausing", "stopping") and "started" in live
+            else 0
+        )
+        durations = live.get("durations", [])
+        remaining = max(0, total - completed)
+        if len(durations) >= 2 and remaining and scan["status"] == "running" and scan["phase"] != "inventory":
+            average = sum(durations) / len(durations)
+            progress.update(
+                eta_low=round(average * remaining * 0.7),
+                eta_high=round(average * remaining * 1.5),
+                eta_basis=f"Recent {len(durations)} completed units; estimate excludes later phases.",
+            )
+        progress["units_per_second"] = (completed - live.get("baseline", 0)) / max(1, duration)
+        if scan["phase"] == "inventory":
+            progress.update(percent=None, eta_basis="Discovering folders; total size is not known yet.")
+        return progress
 
     def inventory(self, scan):
         scan_id = scan["id"]
@@ -323,6 +476,19 @@ class Engine:
                 break
             rel, dir_id = row["rel"], row["id"]
             self.store.update(scan_id, message=f"Inventory: {rel}")
+            with self.store.connect() as db:
+                counts = db.execute(
+                    "SELECT COUNT(*),COALESCE(SUM(done),0) FROM directories WHERE scan_id=?", (scan_id,)
+                ).fetchone()
+            self.progress_update(
+                scan_id,
+                completed=counts[1],
+                total=0,
+                discovered=counts[0],
+                current=rel,
+                unit="folders",
+                stage="inventory",
+            )
             with self.store.connect() as db:
                 db.execute("DELETE FROM files WHERE dir_id=?", (dir_id,))
             batch = []
@@ -371,8 +537,8 @@ class Engine:
                                 elif stat.S_ISDIR(info.st_mode):
                                     with self.store.connect() as db:
                                         db.execute(
-                                            "INSERT OR IGNORE INTO directories(scan_id,rel) VALUES(?,?)",
-                                            (scan_id, child),
+                                            "INSERT OR IGNORE INTO directories(scan_id,rel,parent_rel) VALUES(?,?,?)",
+                                            (scan_id, child, rel),
                                         )
                                 elif stat.S_ISREG(info.st_mode):
                                     cat, tech, score = classify(
@@ -530,7 +696,13 @@ class Engine:
         deadline = started + settings["time_budget_minutes"] * 60
         errors = 0
         limited = False
+        self.live.setdefault(scan_id, {}).update(phase_started=time.monotonic(), durations=[], baseline=0)
+        self.progress_update(
+            scan_id, completed=0, total=len(pending), unit="folders", stage="analysis", current=""
+        )
+        processed = 0
         for fid in pending:
+            unit_started = time.monotonic()
             self.checkpoint(scan)
             if calls >= call_limit or read >= read_limit or time.monotonic() >= deadline:
                 limited = True
@@ -552,6 +724,7 @@ class Engine:
                 ]
             samples = json.loads(row["samples"])
             self.store.update(scan_id, message=f"Investigating: {row['rel']}")
+            self.progress_update(scan_id, current=row["rel"])
             for round_number in range(2):
                 self.checkpoint(scan)
                 if calls >= call_limit or time.monotonic() >= deadline:
@@ -634,6 +807,9 @@ class Engine:
                     break
                 if not result["needs_more_samples"]:
                     break
+            processed += 1
+            self.unit_finished(scan_id, time.monotonic() - unit_started)
+            self.progress_update(scan_id, completed=processed)
         self.checkpoint(scan)
         with self.store.connect() as db:
             remaining_folders = db.execute(
@@ -661,6 +837,10 @@ class Engine:
             elif kind == "file":
                 row = db.execute(
                     "SELECT rel FROM files WHERE scan_id=? AND id=?", (scan_id, item_id)
+                ).fetchone()
+            elif kind == "directory":
+                row = db.execute(
+                    "SELECT rel FROM directories WHERE scan_id=? AND id=?", (scan_id, item_id)
                 ).fetchone()
             else:
                 raise ValueError("Invalid catalog entry.")

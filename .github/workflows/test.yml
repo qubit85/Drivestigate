@@ -25,6 +25,7 @@ jobs:
         with:
           node-version: '22'
       - run: node --check drivestigate/static/app.js
+      - run: node --check drivestigate/static/visuals.js
       - run: python -m build
       - uses: actions/upload-artifact@v4
         with:

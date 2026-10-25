@@ -1,69 +1,62 @@
-# Drivestigate 1.0.0 validation
+# Drivestigate 1.1.0 validation
 
 Validated on 2026-10-25 on an Apple Silicon Mac, using Python 3.12 and the locally
-installed Ollama model `qwen35-9b-alltag-64k:latest` (MLX runner).
+installed model `qwen35-9b-alltag-64k:latest` through the local Ollama MLX runner.
+Only synthetic sources were used for acceptance testing.
 
 ## Automated checks
 
-- **36 tests passed**: inventory and source integrity; budgets and unreviewed-folder
-  visibility; pause/resume and restart recovery; disconnected/replaced sources;
-  symlink/path escape protection; invalid filenames; Office compression limits;
-  model schema and file-reference validation; cloud-model rejection; MLX compatibility;
-  snapshot exports, escaping and CSV formula protection; session/CSRF/Host/Origin
-  boundaries; and final report-counter refresh.
-- Ruff lint and formatting checks passed.
-- JavaScript syntax check passed on Node 22.
-- `pip check` passed.
-- Wheel and source distribution built; wheel includes all four frontend assets.
-- All six GitHub Actions jobs passed: Linux and macOS on Python 3.11, 3.12 and 3.14.
-  [Verified CI run](https://github.com/qubit85/Drivestigate/actions/runs/40227258169).
+- **53 tests passed**, including the existing inventory, source integrity, budget,
+  disconnect, extraction, model validation and local-session security checks.
+- New checks cover persistent queue order, stale/repeated ID rejection, enqueueing
+  while busy, automatic continuation, disconnected-job bypass and restart recovery.
+- Detail checks cover every inventoried file including technical binaries, full SHA-256,
+  duplicate groups, per-file AI and structural-only mode, parser errors, AI failure/retry,
+  pause/resume without duplicate completed work, and unchanged source bytes/mtime.
+- Graph provenance, search escaping, file caps, folder scoping, tree pagination,
+  v1 catalog migration, rough phase ETA behavior, scoped API access and ZIP exports pass.
+- Obsidian wikilinks resolve to generated notes, unsafe labels remain literal, original
+  files are absent, excerpts are omitted by default, and rebuilding preserves older vaults.
+- HTML/CSV/JSON detail reports include the file coverage ledger and known file links.
+- Ruff lint/format, Node 22 syntax checks for both scripts and `pip check` passed.
+- CI defines Linux/macOS checks on Python 3.11, 3.12 and 3.14, plus wheel/source builds.
 
-## Live local-model acceptance
+## Local-model and browser acceptance
 
-Only synthetic data was used. No personal source drive was scanned.
+- The real local Qwen model completed a three-file all-file investigation in roughly
+  40 seconds: three fingerprints, three assessments, three content excerpts and one
+  identical-byte group. No cloud inference or personal source-drive scan was used.
+- The compatibility path handles the MLX runner's HTTP 501 for structured output and
+  validates the resulting JSON, topic bounds and referenced IDs in the application.
+- Browser checks exercised queue hold, adding jobs while held, arrow reordering and
+  drag/drop reordering. The queue visibly reflected the resulting order.
+- Folder map drilling, per-file evidence, full hashes, English assessments, topic and
+  duplicate links, graph inspection, vault controls and accessible graph navigation
+  were checked in the running application. Screenshots contain synthetic sources only.
+- The self-contained app completed a separate three-file structural detail pass: all
+  three files were hashed and parsed, one duplicate group was detected, and a 4,973-byte
+  vault ZIP contained human-readable file notes and the correct instance-port links.
+- The versioned, ad-hoc signed Mac bundle passed `codesign --verify --deep --strict`.
+  The build guard rejected rebuilding while the packaged app was running.
+- The final app runs on port 8741 with the existing Application Support catalog. All
+  three saved investigations survived migration; an interrupted disconnected drive
+  investigation was restored to the waiting queue with its progress preserved.
 
-- Browser-created investigation inventoried 13 files in 15 folders, grouped three
-  technical files, and recorded one excluded trash directory.
-- Qwen returned English assessments linked to known file IDs. A budget of two folders
-  produced two AI-reviewed folders and left the other five visibly unreviewed.
-- The installed MLX runner returned HTTP 501 for native JSON-schema output. The
-  compatibility path successfully generated JSON without grammar constraints, with
-  identical application-side schema and reference validation.
-- Model discovery displayed six installed local models. Connection test, prompt/focus
-  editing and settings persistence were exercised through the browser.
-- Clicking the synthetic Family finding opened its matching folder in Finder; the
-  Finder accessibility state showed the two expected synthetic files.
-- The English desktop layout and compact responsive layout were inspected. Screenshots
-  in `screenshots/` contain only synthetic demo paths and public model names.
+## Scale and release boundaries
 
-## Packaged application
+The existing metadata benchmark created 10,000 synthetic text files across 100 folders
+on the internal SSD and finished inventory plus one simulated assessment in 1.7 seconds.
+This is not a detail-mode or USB benchmark. Detail mode reads every accessible regular
+file completely for hashing and can take substantially longer, especially with one AI
+call per file. ETA ranges use recent unit durations, exclude later phases and are not
+confidence intervals. Inventory discovery has no reliable total or ETA initially.
 
-- Built `dist/Drivestigate.app` for Apple Silicon, approximately 31 MiB.
-- Executed its bundled reader directly: a synthetic Markdown file returned the expected
-  excerpt without relying on the development Python installation.
-- Started the app on a separate loopback port with an isolated catalog. A complete
-  synthetic scan cataloged 13 files, assessed one folder within the one-call budget,
-  and produced nonempty HTML, CSV and JSON exports (5,899 / 1,097 / 5,592 bytes in that run).
-- The final app was also started on port 8741 using its normal Application Support catalog.
+The app graph displays at most 400 matching files; the exported vault includes all
+inventoried files. AI topic links are suggestions. Full-byte hashes do not establish
+full semantic understanding. Bounded readers, unsupported/encrypted formats, exclusions,
+read errors and skipped filesystem entries remain explicit coverage limits.
 
-## Scale check
-
-`scripts/scale_check.py` created 10,000 synthetic text files across 100 folders on the
-internal SSD. Inventory plus one simulated assessment finished in **1.7 seconds**,
-read three content samples, and retained 99 unreviewed folders in the report.
-This is a metadata scalability check, not a USB-drive or live-inference benchmark.
-
-## Release boundaries
-
-- macOS desktop integration is the supported user-facing target. The Linux/macOS core
-  test and package matrix passed on Python 3.11, 3.12 and 3.14; native Finder actions
-  were additionally verified on the local Mac.
-- A physical removable drive, failing hardware, and a real unplug/replug cycle were not
-  available for acceptance testing. Simulated disconnect/replacement and persistence
-  behavior are covered by tests. Treat this as a tested local release, not a forensic certification.
-- PDF/Office/ZIP/image sampling has explicit size and format limits listed in the README.
-  OCR, legacy/binary-format content inspection and exhaustive recovery are outside this release.
-- The desktop bundle is locally ad-hoc signed. Public distribution requires Apple
-  Developer signing and notarization; neither is performed automatically.
-- LLM judgments remain probabilistic. Sampling and displayed evidence do not guarantee
-  that every important file is found or that a file can be deleted.
+A physical drive unplug/replug cycle, failing hardware and notarized distribution have
+not been acceptance tested. Simulated disconnect/replacement and catalog persistence
+are covered. The macOS bundle is ad-hoc signed; public distribution requires Apple
+Developer signing and notarization. This is a tested local release, not forensic certification.
