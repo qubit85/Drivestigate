@@ -1,12 +1,12 @@
-# Drivestigate 1.1.0 validation
+# Drivestigate 1.2.0 validation
 
-Validated on 2026-10-25 on an Apple Silicon Mac, using Python 3.12 and the locally
+Validated on 2026-10-26 on an Apple Silicon Mac, using Python 3.12 and the locally
 installed model `qwen35-9b-alltag-64k:latest` through the local Ollama MLX runner.
 Only synthetic sources were used for acceptance testing.
 
 ## Automated checks
 
-- **54 tests passed**, including the existing inventory, source integrity, budget,
+- **66 tests passed**, including the existing inventory, source integrity, budget,
   disconnect, extraction, model validation and local-session security checks.
 - New checks cover persistent queue order, stale/repeated ID rejection, enqueueing
   while busy, automatic continuation, disconnected-job bypass and restart recovery.
@@ -21,6 +21,25 @@ Only synthetic sources were used for acceptance testing.
 - HTML/CSV/JSON detail reports include the file coverage ledger and known file links.
 - Ruff lint/format, Node 22 syntax checks for both scripts and `pip check` passed.
 - CI defines Linux/macOS checks on Python 3.11, 3.12 and 3.14, plus wheel/source builds.
+
+## Consolidated-report and map regression checks
+
+- Completed runs save a consolidated report automatically. Tests cover local AI synthesis,
+  fallback when inference fails, strict next-step/reference validation, unsupported numeric-claim rejection, bounded reading
+  lists, low-priority clutter filtering, complete byte/file totals across grouped areas,
+  portable HTML, escaped untrusted text and authenticated report routes.
+- Regenerating a report while its source is offline preserves the scan's original phase,
+  status, investigation-call count and source-read count. No inventory or content reader
+  is invoked. Existing queued/running jobs cannot be replaced by a report request.
+- Browser acceptance uses a synthetic 27-file, 26-folder tree with strongly skewed sizes
+  and many tiny entries. All 24 map entries remain accessible; rendered tiles stay within
+  the map bounds, with no horizontal page overflow.
+- The direct **Start all-file investigation** action prepares a new form with the same
+  source and the All files radio selected. Both scan choices and the scope explanation
+  are visible in the form. Individual finding cards are collapsed by default.
+- The local Qwen model completed the sampled fixture and automatically produced a saved
+  narrative report and visual breakdowns. Numeric charts use catalog values; semantic
+  conclusions remain limited to supplied saved assessments.
 
 ## Local-model and browser acceptance
 

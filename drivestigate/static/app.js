@@ -128,8 +128,8 @@ async function refreshReport() {
   if (!id) return;
   const data = await api(`/api/scans/${id}`);
   if (id !== state.selected) return;
-  if (state.scan?.id === id && data.scan.updated === state.scan.updated && data.connected === state.connected && !["running", "pausing", "stopping"].includes(data.scan.status)) return;
-  state.scan = data.scan; state.connected = data.connected;
+  if (state.scan?.id === id && data.scan.updated === state.scan.updated && data.connected === state.connected && data.report_state === state.reportState && !["running", "pausing", "stopping"].includes(data.scan.status)) return;
+  state.scan = data.scan; state.connected = data.connected; state.reportState = data.report_state;
   const scan = data.scan, stats = data.stats;
   $("report-title").textContent = scan.name; $("report-root").textContent = scan.root;
   $("scan-status-text").textContent = scan.message || "Ready";
@@ -150,13 +150,14 @@ async function refreshReport() {
     ["Text / archive samples", num(stats.content_samples), `${num(stats.samples)} samples, including metadata`]]) {
     const metric = el("div", "metric"); metric.append(el("small", "", title), el("strong", "", value), el("p", "", note)); metrics.append(metric);
   }
-  $("coverage-text").textContent = `${num(stats.inventoried_dirs)} / ${num(stats.directories)} discovered folders inventoried · ${num(stats.analyzed_folders)} / ${num(stats.findings)} relevant folders assessed by AI · ${num(scan.llm_calls)} AI calls · ${formatBytes(scan.read_bytes)} read budget used`;
+  $("coverage-text").textContent = `${num(stats.inventoried_dirs)} / ${num(stats.directories)} discovered folders inventoried · ${num(stats.analyzed_folders)} / ${num(stats.findings)} relevant folders assessed by AI · ${num(scan.llm_calls)} investigation AI calls · ${formatBytes(scan.read_bytes)} read budget used`;
   $("coverage-fill").style.width = (stats.findings ? 100 * stats.analyzed_folders / stats.findings : 0) + "%";
   $("technical-summary").textContent = `${num(stats.technical_files)} technical files (${formatBytes(stats.technical_bytes)}) cataloged and grouped. Potential user files inside application and system folders remain visible. Image samples are separate from the content excerpt count.`;
   const types = $("type-breakdown"); types.replaceChildren();
   for (const type of stats.types) { const row = el("div", "type-row"); row.append(el("span", "", type.category), el("span", "", `${num(type.count)} files · ${formatBytes(type.bytes)}`)); types.append(row); }
   $("scan-settings").textContent = JSON.stringify(scan.settings, null, 2);
   for (const format of ["html", "csv", "json"]) $("export-" + format).href = `/api/scans/${id}/report.${format}`;
+  if (window.DriveReport) await window.DriveReport.update(data);
   if (window.DriveViews) await window.DriveViews.update(data);
   await loadFindings();
   const events = await api(`/api/scans/${id}/events`);
@@ -344,7 +345,9 @@ async function init() {
   const params = new URLSearchParams(location.search);
   if (params.has("scan")) {
     await showReport(params.get("scan"));
+    if (params.has("folder")) { const folder = await api(`/api/scans/${state.selected}/directory/${Number(params.get("folder"))}`); window.DriveViews.exploreFolder(folder.rel); }
     if (params.has("finding")) {
+      $("individual-findings").open = true;
       const finding = await api(`/api/scans/${state.selected}/finding/${Number(params.get("finding"))}`);
       let card = $(`finding-${finding.id}`);
       if (!card) { card = renderFinding(finding); $("findings").prepend(card); }

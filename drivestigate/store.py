@@ -62,6 +62,11 @@ CREATE TABLE IF NOT EXISTS file_details (
  error TEXT NOT NULL DEFAULT '', duration REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS detail_hash ON file_details(sha256);
+CREATE TABLE IF NOT EXISTS scan_reports (
+ scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,
+ payload TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'pending',
+ generated TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -72,7 +77,7 @@ class Store:
         self.lock = threading.RLock()
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 2:
+            if version > 3:
                 raise RuntimeError("This catalog was created by a newer version of Drivestigate.")
             db.executescript(SCHEMA)
             scan_columns = {r[1] for r in db.execute("PRAGMA table_info(scans)")}
@@ -81,6 +86,7 @@ class Store:
                 "queued_finding": "INTEGER",
                 "progress": "TEXT NOT NULL DEFAULT '{}'",
                 "vault_path": "TEXT NOT NULL DEFAULT ''",
+                "queue_task": "TEXT NOT NULL DEFAULT 'investigate'",
             }.items():
                 if name not in scan_columns:
                     db.execute(f"ALTER TABLE scans ADD COLUMN {name} {definition}")
@@ -97,7 +103,8 @@ class Store:
                 if name not in dir_columns:
                     db.execute(f"ALTER TABLE directories ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
             db.execute("CREATE INDEX IF NOT EXISTS dirs_parent ON directories(scan_id,parent_rel)")
-            db.execute("PRAGMA user_version=2")
+            db.execute("PRAGMA user_version=3")
+            db.execute("UPDATE scan_reports SET state='pending' WHERE state='building'")
             db.execute(
                 "UPDATE scans SET status='paused',message='Resume after restarting.' "
                 "WHERE status IN ('running','pausing','stopping')"
@@ -175,6 +182,7 @@ class Store:
             "queued_finding",
             "progress",
             "vault_path",
+            "queue_task",
         }
         if set(values) - allowed:
             raise ValueError("Unknown scan field")
@@ -192,6 +200,24 @@ class Store:
             db.execute(
                 "INSERT INTO events(scan_id,created,kind,rel,message) VALUES(?,?,?,?,?)",
                 (scan_id, now(), kind, rel, str(message)[:1000]),
+            )
+
+    def report(self, scan_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM scan_reports WHERE scan_id=?", (scan_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["data"] = json.loads(result.pop("payload"))
+        return result
+
+    def save_report(self, scan_id, data, state="ready", error=""):
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO scan_reports(scan_id,payload,state,generated,error) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(scan_id) DO UPDATE SET payload=excluded.payload,state=excluded.state,"
+                "generated=excluded.generated,error=excluded.error",
+                (scan_id, json.dumps(data), state, now(), error[:500]),
             )
 
     def scans(self):

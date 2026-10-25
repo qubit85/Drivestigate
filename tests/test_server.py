@@ -151,3 +151,20 @@ def test_browser_sessions_are_isolated_by_local_port(server, tmp_path):
         second.shutdown()
         second.server_close()
         thread.join(3)
+
+
+def test_comprehensive_report_routes_include_saved_and_portable_views(server, tmp_path):
+    server.engine = Engine(server.store, FakeOllama)
+    root = create_demo(tmp_path / "report-source")
+    sid = server.engine.create(root, "Consolidated", DEFAULTS)
+    wait(server.engine)
+    data = json.loads(request(server, f"/api/scans/{sid}/summary")[1])
+    assert data["state"] == "ready" and "What is on this drive?" in data["html"]
+    code, body, headers = request(server, f"/api/scans/{sid}/comprehensive.html")
+    assert code == 200 and "text/html" in headers["Content-Type"]
+    assert b"File timeline" in body and b"<style>" in body
+    assert request(server, f"/api/scans/{sid}/summary", auth=False)[0] == 403
+    root.rename(tmp_path / "report-offline")
+    assert request(server, f"/api/scans/{sid}/summary", {})[0] == 200
+    wait(server.engine)
+    assert server.store.get_scan(sid)["status"] == "completed"

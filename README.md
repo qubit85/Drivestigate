@@ -53,8 +53,8 @@ from its Dock icon. The source launcher remains useful for development and termi
 
 1. Open **Settings**. Select a local model and test the connection. Edit the system
    prompt, add search priorities, save reusable profiles, and choose sampling budgets.
-2. Start **New investigation**. Choose a mounted drive or folder, select **Adaptive overview**
-   or **All-file detail + Obsidian vault**, and add it to the queue. The synthetic demo is optional.
+2. Start **New investigation**. Choose a mounted drive or folder, select **Sampled files**
+   or **All files + Obsidian vault**, and add it to the queue. The synthetic demo is optional.
 3. Inventory enumerates every accessible directory entry and collects metadata. Excluded
    paths, symlinks, other mounted filesystems, permission errors and unreadable filenames
    are logged. Files are not opened for their contents during inventory.
@@ -87,11 +87,47 @@ Prompts, filters, model selection and budgets are snapshotted per scan. To use d
 settings on existing material, create a new scan. Budgets renew on each explicit resume
 or deepen action. Metadata inventory is not limited by the AI time budget.
 
+## One comprehensive report per investigation
+
+The report begins with a consolidated document: a content narrative, inventory totals,
+file-type and top-level storage charts, review coverage, a last-modified-year timeline,
+up to ten promising evidence paths and recommended next steps. Low-priority findings
+stay outside the short reading list. All inventory bytes remain accounted for, including
+technical material and folders grouped under “Other”. Individual finding cards are
+available in the expandable **Individual findings & evidence** section.
+
+A report is saved automatically after each completed investigation run, including runs
+that finish at their sampling budget. It states the remaining coverage gaps. A single
+additional local Qwen synthesis request (bounded to 60 seconds) summarizes saved
+assessments and aggregate metadata; source files are not read again. Overview budgets
+apply to investigation requests; report synthesis has this separate bounded request.
+If synthesis fails, a readable catalog summary and all charts remain available.
+Structural detail mode with AI disabled does not call the model for its report.
+
+**Generate report / Regenerate report** also works for older or paused investigations,
+including disconnected sources. This task uses the persistent queue, preserves the
+original investigation phase/status and does not resume file scanning. Opening an older
+completed investigation generates its missing report automatically. Resuming a scan
+marks its previous report as stale until a fresh version is ready.
+
+**Open / save full report** opens a portable HTML document with its styles included.
+Save it from the browser or use Print / Save as PDF. Evidence links return to the local
+app; paths in the in-app report open Finder when the source is connected. Exports contain
+private paths and model assessments and should be handled like the source material.
+
+Scan modes are now labeled **Sampled files** and **All files + Obsidian vault** in
+**New investigation**. Each existing investigation also displays its current mode and
+provides a button to prepare a new investigation in the other mode. Changing modes
+starts a separate catalog snapshot rather than changing how saved findings were obtained.
+
+The folder map scales labels to available tile space. Entries too small to draw remain
+accessible in the compact list below it, including on narrow screens.
+
 ## All-file detail and the knowledge graph
 
 ![Knowledge graph with synthetic file evidence](docs/screenshots/knowledge-graph.png)
 
-**All-file detail + Obsidian vault** attempts every inventoried regular file, including
+**All files + Obsidian vault** attempts every inventoried regular file, including
 technical files. Each accessible unchanged file is read completely for a SHA-256
 fingerprint, then receives a bounded supported content extraction and, by default, one
 local-model assessment with suggested topics. Overview sampling, time and read budgets

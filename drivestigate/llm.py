@@ -1,6 +1,7 @@
 """Local-only Ollama client with bounded responses and validated decisions."""
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -30,6 +31,15 @@ FILE_SCHEMA = {
     "additionalProperties": False,
 }
 FILE_SCHEMA["properties"]["topics"] = {"type": "array", "items": {"type": "string"}, "maxItems": 5}
+REPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        k: v for k, v in SCHEMA["properties"].items() if k in ("summary", "reason", "priority", "file_ids")
+    },
+    "required": ["summary", "reason", "priority", "file_ids", "next_steps"],
+    "additionalProperties": False,
+}
+REPORT_SCHEMA["properties"]["next_steps"] = {"type": "array", "items": {"type": "string"}, "maxItems": 5}
 
 
 class OllamaError(ValueError):
@@ -108,6 +118,35 @@ class Ollama:
         result["topics"] = list(dict.fromkeys(t.strip() for t in topics))
         return result
 
+    def summarize_report(self, evidence, timeout=None):
+        result = self._analyze(evidence, REPORT_SCHEMA, timeout)
+        steps = result.get("next_steps")
+        if (
+            not isinstance(steps, list)
+            or len(steps) > 5
+            or any(not isinstance(s, str) or not s.strip() or len(s) > 600 for s in steps)
+        ):
+            raise ValueError("Invalid next steps in comprehensive report.")
+        # Do not let a narrative confuse folder, sample and file counts. Numeric catalog
+        # totals are rendered separately. Dates/identifiers explicitly in assessed text remain valid.
+        supported = set(
+            re.findall(
+                r"\b\d+(?:[.,]\d+)?\b",
+                " ".join(
+                    str(s.get("id", "")) + " " + str(s.get("rel", "")) + " " + str(s.get("text", ""))
+                    for s in evidence.get("samples", [])
+                )
+                + " "
+                + " ".join(str(a.get("folder", "")) for a in evidence.get("areas", [])),
+            )
+        )
+        prose = result["summary"] + " " + result["reason"] + " " + " ".join(steps)
+        if set(re.findall(r"\b\d+(?:[.,]\d+)?\b", prose)) - supported:
+            raise ValueError(
+                "Report narrative introduced unsupported numerical claims; catalog summary retained."
+            )
+        return result
+
     def _analyze(self, evidence, schema, timeout=None):
         evidence = deepcopy(evidence)
         images = []
@@ -127,7 +166,20 @@ class Ollama:
                     "role": "system",
                     "content": SAFETY_PROMPT
                     + "\n\n"
-                    + self.settings["system_prompt"]
+                    + (
+                        "Create a concise English comprehensive report from this saved investigation. "
+                        "Write two or three connected paragraphs in summary, covering main content, promising areas and coverage gaps. "
+                        "Synthesize the supplied assessed examples and aggregate inventory; do not list every folder. "
+                        "Leave numerical counts, sizes and example IDs to the charts; do not repeat them in prose. "
+                        "Folder assessments do not establish how many individual files were content-reviewed. "
+                        "Do not infer contents of unsampled files, turn claims inside files into facts, or invent paths. "
+                        "Reason must explain uncertainty and evidence limits. Return up to five practical read-only next_steps "
+                        "available in Drivestigate: review evidence paths, resume remaining folders, choose all-file mode, or inspect issues. "
+                        "Do not suggest forensic recovery or shell commands. "
+                        "file_ids must refer only to the supplied assessed examples. Do not recommend deletion."
+                        if schema is REPORT_SCHEMA
+                        else self.settings["system_prompt"]
+                    )
                     + "\n\nOwner's search focus:\n"
                     + self.settings["search_focus"]
                     + (
@@ -144,7 +196,11 @@ class Ollama:
                 },
                 message,
             ],
-            "options": {"temperature": 0, "num_ctx": 16384, "num_predict": 700},
+            "options": {
+                "temperature": 0,
+                "num_ctx": 16384,
+                "num_predict": 1500 if schema is REPORT_SCHEMA else 700,
+            },
             "keep_alive": "10m",
         }
         # UTF-8 bytes are a conservative upper bound on ordinary text token counts.

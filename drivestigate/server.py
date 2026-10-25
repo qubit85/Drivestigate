@@ -110,7 +110,15 @@ class Handler(BaseHTTPRequestHandler):
             port = self.server.server_port
             if self.headers.get("Host") not in {f"127.0.0.1:{port}", f"localhost:{port}"}:
                 return self.reply({"error": "Invalid host."}, 403)
-            if path in {"/", "/app.js", "/visuals.js", "/style.css", "/icon.svg"}:
+            if path in {
+                "/",
+                "/app.js",
+                "/visuals.js",
+                "/comprehensive.js",
+                "/report.css",
+                "/style.css",
+                "/icon.svg",
+            }:
                 if self.headers.get("Sec-Fetch-Dest") in {"iframe", "frame"}:
                     return self.reply({"error": "Embedding is not allowed."}, 403)
                 filename = {"/": "index.html"}.get(path, path[1:])
@@ -118,6 +126,8 @@ class Handler(BaseHTTPRequestHandler):
                     "/": "text/html",
                     "/app.js": "text/javascript",
                     "/visuals.js": "text/javascript",
+                    "/comprehensive.js": "text/javascript",
+                    "/report.css": "text/css",
                     "/style.css": "text/css",
                     "/icon.svg": "image/svg+xml",
                 }[path]
@@ -166,8 +176,30 @@ class Handler(BaseHTTPRequestHandler):
                             "stats": cached[2],
                             "connected": engine.connected(scan),
                             "progress": engine.progress(scan),
+                            "report_state": (store.report(scan_id) or {}).get("state", "preview"),
                         }
                     )
+                if segments[3] in {"summary", "comprehensive.html"}:
+                    from .summary import catalog_report, render_report, report_payload
+
+                    if segments[3] == "summary":
+                        return self.reply(report_payload(store, scan_id, self.server.origin))
+                    with store.snapshot() as snapshot:
+                        saved = snapshot.report(scan_id)
+                        data = saved["data"] if saved and saved["data"] else catalog_report(snapshot, scan_id)
+                        return self.reply(
+                            render_report(data, self.server.origin, standalone=True),
+                            mime="text/html; charset=utf-8",
+                        )
+                if segments[3] == "directory" and len(segments) == 5:
+                    with store.connect() as db:
+                        row = db.execute(
+                            "SELECT rel FROM directories WHERE scan_id=? AND id=?",
+                            (scan_id, int(segments[4])),
+                        ).fetchone()
+                    if not row:
+                        raise ValueError("Folder not found in this investigation.")
+                    return self.reply({"rel": row["rel"]})
                 if segments[3] == "tree":
                     return self.reply(
                         store.tree(
@@ -344,6 +376,8 @@ class Handler(BaseHTTPRequestHandler):
                     engine.interrupt(scan_id, stop=action == "stop")
                 elif action == "resume":
                     engine.start(scan_id)
+                elif action == "summary":
+                    engine.start(scan_id, report_only=True)
                 elif action == "deepen":
                     engine.start(scan_id, finding_id=int(data["finding_id"]))
                 elif action == "reveal":

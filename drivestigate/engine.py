@@ -240,7 +240,8 @@ class Engine:
                 ]
             for scan_id in jobs:
                 scan = self.store.get_scan(scan_id)
-                if not self.connected(scan):
+                report_only = scan["queue_task"].startswith("report:")
+                if not report_only and not self.connected(scan):
                     if scan["status"] != "waiting":
                         self.store.update(
                             scan_id, status="waiting", message="Waiting for the original drive."
@@ -256,7 +257,7 @@ class Engine:
                 }
                 self.store.update(
                     scan_id,
-                    device=identity(scan["root"])[0],
+                    device=scan["device"] if report_only else identity(scan["root"])[0],
                     status="running",
                     message="Starting investigation …",
                 )
@@ -341,12 +342,16 @@ class Engine:
         if self.active_id:
             raise ValueError("An investigation is already running. Pause it first.")
 
-    def start(self, scan_id, finding_id=None):
+    def start(self, scan_id, finding_id=None, report_only=False):
         with self.lock:
             scan = self.store.get_scan(scan_id)
             if self.active_id == scan_id:
                 raise ValueError("This investigation is already running.")
-            if not self.connected(scan):
+            if report_only and scan["status"] in ("queued", "waiting", "running", "pausing", "stopping"):
+                raise ValueError(
+                    "The comprehensive report will be generated after this investigation finishes."
+                )
+            if not report_only and not self.connected(scan):
                 raise ValueError("The original drive is disconnected or its identity has changed.")
             if finding_id is not None:
                 with self.store.connect() as db:
@@ -365,8 +370,12 @@ class Engine:
                 status="queued",
                 queue_order=scan["queue_order"] if scan["status"] in ("queued", "waiting") else order,
                 queued_finding=finding_id,
-                message="Queued for investigation.",
+                queue_task=f"report:{scan['status']}" if report_only else "investigate",
+                message="Queued for comprehensive report." if report_only else "Queued for investigation.",
             )
+            if not report_only:
+                with self.store.connect() as db:
+                    db.execute("UPDATE scan_reports SET state='stale' WHERE scan_id=?", (scan_id,))
             self.kick()
 
     def interrupt(self, scan_id, stop=False):
@@ -402,6 +411,14 @@ class Engine:
         started = time.monotonic()
         scan = self.store.get_scan(scan_id)
         try:
+            if scan["queue_task"].startswith("report:"):
+                from .summary import generate_report
+
+                generate_report(self, scan_id)
+                self.store.update(
+                    scan_id, status=scan["queue_task"].split(":")[1], message="Comprehensive report ready."
+                )
+                return
             if scan["phase"] == "inventory":
                 self.inventory(scan)
                 self.checkpoint(scan)
@@ -414,6 +431,15 @@ class Engine:
                 investigate_files(self, self.store.get_scan(scan_id))
             else:
                 self.investigate(self.store.get_scan(scan_id), finding_id, time.monotonic())
+            if self.store.get_scan(scan_id)["status"] == "completed":
+                from .summary import generate_report
+
+                message = self.store.get_scan(scan_id)["message"]
+                self.store.update(scan_id, status="running", message="Creating the comprehensive report …")
+                generate_report(self, scan_id)
+                self.store.update(
+                    scan_id, status="completed", message=message + " Comprehensive report ready."
+                )
         except Interrupted:
             self.store.update(scan_id, status=self.intent, message="Investigation paused; progress saved.")
         except Exception as exc:
@@ -422,6 +448,10 @@ class Engine:
         finally:
             current = self.store.get_scan(scan_id)
             self.store.update(scan_id, elapsed=current["elapsed"] + time.monotonic() - started)
+            with self.store.connect() as db:
+                db.execute(
+                    "UPDATE scan_reports SET state='pending' WHERE scan_id=? AND state='building'", (scan_id,)
+                )
             with self.lock:
                 self.active_id = None
                 self.kick()

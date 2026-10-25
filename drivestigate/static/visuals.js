@@ -7,7 +7,7 @@ window.DriveViews = (() => {
   const colors = {file: "#5b9877", folder: "#527e9d", topic: "#c49b4c", type: "#9c88b3", duplicate: "#c97468"};
   const phaseNames = {inventory: "Discovering folders", analysis: "Adaptive investigation", detail: "All-file inspection",
     vault: "Building Obsidian vault", complete: "Investigation complete"};
-  const seconds = n => n < 60 ? `${Math.max(1, Math.round(n))} sec` : n < 3600 ? `${Math.round(n / 60)} min` : `${(n / 3600).toFixed(1)} hr`;
+  const seconds = n => n < 60 ? `${Math.max(0, Math.round(n))} sec` : n < 3600 ? `${Math.round(n / 60)} min` : `${(n / 3600).toFixed(1)} hr`;
   const isDetail = () => state.scan?.settings.investigation_mode === "detail";
 
   async function refreshQueue() {
@@ -88,6 +88,13 @@ window.DriveViews = (() => {
       : scan.status === "completed" ? "Run finished" : ["queued", "waiting"].includes(scan.status) ? statusNames[scan.status]
       : scan.status !== "running" ? "Paused" : "Calculating …";
     $("eta-caption").textContent = p.eta_basis || "Time remaining in this phase; available after two completed units.";
+    if (data.report_state === "building") {
+      $("phase-label").textContent = "Generating comprehensive report";
+      $("phase-current").textContent = "Synthesizing saved findings and preparing visual breakdowns …";
+      $("eta-value").textContent = "Preparing report …";
+      $("eta-caption").textContent = "One bounded local synthesis; no source files are read again.";
+      $("phase-rate").textContent = `${seconds(p.elapsed_seconds || 0)} elapsed`;
+    }
     if (isDetail()) {
       const d = data.stats.detail;
       $("coverage-text").textContent = `${num(d.processed)} / ${num(data.stats.files)} files processed · ${num(d.hashed)} full-byte fingerprints · ${num(d.ai_reviewed)} AI assessments · ${num(d.content_read)} readable content samples · ${num(d.errors)} read issues · ${num(d.duplicate_groups)} identical-byte groups`;
@@ -194,20 +201,31 @@ window.DriveViews = (() => {
         status: f.state === "error" ? "error" : ["reviewed", "metadata"].includes(f.state) ? "processed" : "inventoried", kind: "file"})))
       .sort((a, b) => b.bytes - a.bytes).slice(0, 24);
     const map = $("folder-treemap"); map.replaceChildren();
+    const mapWidth = map.clientWidth, mapHeight = map.clientHeight;
+    const entryList = $("map-entry-list"); entryList.replaceChildren();
     const layout = rectangles(tiles.map(t => ({...t, weight: Math.max(1, t.bytes)})), 0, 0, 100, 100, []);
     for (const tile of layout) {
       const node = button("", `map-tile ${tile.status}`, () => guarded(async () => {
         if (tile.kind === "file") return openFile(tile.id);
         view.folder = tile.rel; view.expanded.add(tile.rel); await fetchTree(tile.rel); renderTree(); renderMap();
       }));
-      Object.assign(node.style, {left: `calc(${tile.x}% + 2px)`, top: `calc(${tile.y}% + 2px)`, width: `calc(${tile.width}% - 4px)`, height: `calc(${tile.height}% - 4px)`});
+      Object.assign(node.style, {left: `calc(${tile.x}% + 2px)`, top: `calc(${tile.y}% + 2px)`, width: `max(0px, calc(${tile.width}% - 4px))`, height: `max(0px, calc(${tile.height}% - 4px))`});
       node.title = `${tile.rel} · ${formatBytes(tile.bytes)} · ${tile.status}`;
       node.setAttribute("aria-label", node.title);
-      if (tile.width > 12 && tile.height > 12) node.append(el("strong", "", tile.label), el("small", "", formatBytes(tile.bytes)), el("span", "", tile.status));
-      map.append(node);
+      const width = mapWidth * tile.width / 100 - 4, height = mapHeight * tile.height / 100 - 4;
+      if (width >= 80 && height >= 42) {
+        const content = el("div", "map-tile-content"); content.append(el("strong", "", tile.label));
+        if (height >= 65) content.append(el("small", "", formatBytes(tile.bytes)));
+        if (height >= 90) content.append(el("span", "", tile.status));
+        node.append(content);
+      }
+      const entry = button("", "map-entry", () => node.click());
+      entry.append(el("span", `folder-dot ${tile.status}`), el("span", "", tile.label), el("small", "", `${formatBytes(tile.bytes)} · ${tile.status}`));
+      entryList.append(entry);
+      if (width > 0 && height > 0) map.append(node);
     }
     if (!tiles.length) map.append(el("div", "map-empty", state.scan.phase === "inventory" ? "Discovering this folder …" : "This folder has no inventoried regular files."));
-    $("map-caption").textContent = `Area follows logical file size · up to 24 largest immediate entries · ${own ? num(own.own_files) : data.files.length} own files. State colors describe own-file review, not an exhaustive semantic guarantee.`;
+    $("map-caption").textContent = `Area follows logical file size · up to 24 largest immediate entries · ${own ? num(own.own_files) : data.files.length} own files. Entries too small for a tile are accessible in the list. Colors describe own-file review.`;
     const files = $("folder-file-list"); files.replaceChildren();
     if (data.files.length) files.append(el("h3", "", "Files in this folder"));
     for (const file of data.files) {
@@ -408,5 +426,6 @@ window.DriveViews = (() => {
     setTimeout(() => clearInterval(check), 10000);
   }
   function exploreFolder(rel) { view.folder = rel; view.expanded.add(rel); chooseTab("folder"); $("folder-panel").scrollIntoView({block: "start", behavior: "smooth"}); }
-  return {update, reset, refreshQueue, exploreFolder};
+  new ResizeObserver(() => { if (view.tab === "folder" && view.id && !$("report-view").hidden) renderMap(); }).observe($("folder-treemap"));
+  return {update, reset, refreshQueue, exploreFolder, openFile};
 })();
