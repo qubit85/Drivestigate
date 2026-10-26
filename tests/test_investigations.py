@@ -241,7 +241,7 @@ def test_v1_migration_preserves_settings_and_inventory(tmp_path):
     assert store.settings()["search_focus"] == "Find backups"
     assert store.tree("legacy", parent="a")["items"][1]["rel"] == "a/b"
     with store.connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_eta_waits_for_sample_then_reports_phase_range(detail):

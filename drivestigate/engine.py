@@ -234,7 +234,7 @@ class Engine:
                 jobs = [
                     r[0]
                     for r in db.execute(
-                        "SELECT id FROM scans WHERE status IN ('queued','waiting') "
+                        "SELECT id FROM scans WHERE delete_requested=0 AND status IN ('queued','waiting') "
                         "ORDER BY queue_order,created"
                     )
                 ]
@@ -345,6 +345,8 @@ class Engine:
     def start(self, scan_id, finding_id=None, report_only=False):
         with self.lock:
             scan = self.store.get_scan(scan_id)
+            if scan["delete_requested"]:
+                raise ValueError("This investigation is being deleted.")
             if self.active_id == scan_id:
                 raise ValueError("This investigation is already running.")
             if report_only and scan["status"] in ("queued", "waiting", "running", "pausing", "stopping"):
@@ -381,6 +383,8 @@ class Engine:
     def interrupt(self, scan_id, stop=False):
         with self.lock:
             scan = self.store.get_scan(scan_id)
+            if scan["delete_requested"]:
+                raise ValueError("This investigation is being deleted.")
             if scan["status"] in ("queued", "waiting"):
                 self.store.update(
                     scan_id,
@@ -398,6 +402,22 @@ class Engine:
                 status="stopping" if stop else "pausing",
                 message="Stopping after the current read operation or AI request …",
             )
+
+    def delete(self, scan_id):
+        with self.lock:
+            self.store.get_scan(scan_id)
+            if self.active_id == scan_id:
+                self.store.update(
+                    scan_id,
+                    delete_requested=1,
+                    message="Deleting after the current read operation or AI request finishes …",
+                )
+                self.control.set()
+                return {"deleted": False, "pending": True}
+            self.store.delete_scan(scan_id)
+            self.live.pop(scan_id, None)
+            self.kick()
+            return {"deleted": True, "pending": False}
 
     def checkpoint(self, scan):
         if self.control.is_set():
@@ -453,6 +473,9 @@ class Engine:
                     "UPDATE scan_reports SET state='pending' WHERE scan_id=? AND state='building'", (scan_id,)
                 )
             with self.lock:
+                if self.store.get_scan(scan_id)["delete_requested"]:
+                    self.store.delete_scan(scan_id)
+                    self.live.pop(scan_id, None)
                 self.active_id = None
                 self.kick()
 

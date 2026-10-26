@@ -70,6 +70,28 @@ from its Dock icon. The source launcher remains useful for development and termi
 The persistent queue runs one investigation at a time. On **Overview**, drag queued jobs or
 use the up/down buttons to reorder them. **Hold queue** prevents the next job from starting
 while allowing the active job to finish. Remove a queued job to preserve it as paused.
+
+**Delete** is available in the overview and investigation report; the sidebar also has
+a delete button beside each investigation. Confirming permanently removes that
+investigation's local inventory, findings, saved report and in-app graph. Source files,
+downloaded reports and exported Obsidian vault folders are kept. A running investigation
+offers **Stop and delete**: it waits for the current read or AI request to finish before
+removing the catalog, then continues the queue. A confirmed pending deletion also
+finishes after an application restart. Use queue **Remove** or **Pause** to keep a run
+for later instead of deleting it.
+
+The sidebar uses distinct status badges for running, paused, queued, waiting,
+completed and transitional states. Its **Pause**, **Resume / Queue** and **Stop**
+buttons act directly on that investigation. Progress-only updates retain the current
+sidebar controls so keyboard focus is not replaced during a scan.
+
+On macOS, **Eject drive** in the investigation report safely ejects the external disk
+containing the source, including its other volumes. Pause the active investigation
+and wait for **Paused** first. The scheduler cannot start another reader during the
+eject request. The app verifies the original source identity and macOS device flags,
+rejects internal or non-ejectable disks, and never forces an unmount. Other apps can
+still block ejection; close their files and try again. Saved reports remain available
+after ejection, and queued investigations wait for their source to reconnect.
 Disconnected jobs wait without blocking connected drives and are retried automatically.
 After restarting, interrupted active jobs are paused; queued jobs retain their order.
 

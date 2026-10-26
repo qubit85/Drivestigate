@@ -77,7 +77,7 @@ class Store:
         self.lock = threading.RLock()
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 3:
+            if version > 4:
                 raise RuntimeError("This catalog was created by a newer version of Drivestigate.")
             db.executescript(SCHEMA)
             scan_columns = {r[1] for r in db.execute("PRAGMA table_info(scans)")}
@@ -87,6 +87,7 @@ class Store:
                 "progress": "TEXT NOT NULL DEFAULT '{}'",
                 "vault_path": "TEXT NOT NULL DEFAULT ''",
                 "queue_task": "TEXT NOT NULL DEFAULT 'investigate'",
+                "delete_requested": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in scan_columns:
                     db.execute(f"ALTER TABLE scans ADD COLUMN {name} {definition}")
@@ -103,7 +104,10 @@ class Store:
                 if name not in dir_columns:
                     db.execute(f"ALTER TABLE directories ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
             db.execute("CREATE INDEX IF NOT EXISTS dirs_parent ON directories(scan_id,parent_rel)")
-            db.execute("PRAGMA user_version=3")
+            db.execute("PRAGMA user_version=4")
+            # No worker survives a process restart. Finish confirmed deletions that
+            # were waiting for a read or inference operation when the app closed.
+            db.execute("DELETE FROM scans WHERE delete_requested=1")
             db.execute("UPDATE scan_reports SET state='pending' WHERE state='building'")
             db.execute(
                 "UPDATE scans SET status='paused',message='Resume after restarting.' "
@@ -167,7 +171,15 @@ class Store:
         result = dict(row)
         result["settings"] = json.loads(result["settings"])
         result["progress"] = json.loads(result["progress"])
+        if result["delete_requested"]:
+            result["status"] = "deleting"
         return result
+
+    def delete_scan(self, scan_id):
+        """Remove one catalog and its dependent rows, never filesystem paths."""
+        with self.connect() as db:
+            if not db.execute("DELETE FROM scans WHERE id=?", (scan_id,)).rowcount:
+                raise ValueError("Investigation not found.")
 
     def update(self, scan_id, **values):
         allowed = {
@@ -183,6 +195,7 @@ class Store:
             "progress",
             "vault_path",
             "queue_task",
+            "delete_requested",
         }
         if set(values) - allowed:
             raise ValueError("Unknown scan field")
@@ -225,7 +238,7 @@ class Store:
             return [
                 dict(r)
                 for r in db.execute(
-                    "SELECT id,name,root,created,updated,status,phase,message,queue_order,"
+                    "SELECT id,name,root,created,updated,CASE WHEN delete_requested THEN 'deleting' ELSE status END status,phase,message,queue_order,"
                     "COALESCE(json_extract(settings,'$.investigation_mode'),'overview') mode "
                     "FROM scans ORDER BY created DESC"
                 )
@@ -306,10 +319,10 @@ class Store:
             jobs = [
                 dict(r)
                 for r in db.execute(
-                    "SELECT id,name,root,status,phase,queue_order,queued_finding,message,"
+                    "SELECT id,name,root,CASE WHEN delete_requested THEN 'deleting' ELSE status END status,phase,queue_order,queued_finding,message,"
                     "COALESCE(json_extract(settings,'$.investigation_mode'),'overview') mode "
-                    "FROM scans WHERE status IN ('queued','waiting','running','pausing','stopping') "
-                    "ORDER BY CASE WHEN status IN ('running','pausing','stopping') THEN 0 ELSE 1 END,queue_order,created"
+                    "FROM scans WHERE delete_requested=1 OR status IN ('queued','waiting','running','pausing','stopping') "
+                    "ORDER BY CASE WHEN delete_requested=1 OR status IN ('running','pausing','stopping') THEN 0 ELSE 1 END,queue_order,created"
                 )
             ]
         return {"paused": paused, "jobs": jobs}

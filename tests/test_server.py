@@ -186,3 +186,85 @@ def test_folder_summary_api_is_authenticated_and_scoped(server, tmp_path):
     assert request(server, f"/api/scans/{other}/directory/{parent['id']}/summary")[0] == 400
     root.rename(tmp_path / "offline-folder-summary-source")
     assert request(server, path)[0] == 200
+
+
+def test_delete_requires_session_csrf_and_exact_confirmation(server, tmp_path):
+    server.engine = Engine(server.store, FakeOllama)
+    server.engine.hold_queue(True)
+    sid = server.engine.create(create_demo(tmp_path / "delete-source"), "Delete", DEFAULTS)
+    path = f"/api/scans/{sid}/delete"
+    assert request(server, path, {"confirm": sid}, auth=False)[0] == 403
+    assert request(server, path, {"confirm": sid}, Origin="https://evil.example")[0] == 403
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    req = urllib.request.Request(
+        server.origin + path,
+        data=json.dumps({"confirm": sid}).encode(),
+        headers={"Cookie": f"{server.cookie_name}={server.token}", "Content-Type": "application/json"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        opener.open(req)
+    assert exc.value.code == 403
+    for payload in ({}, {"confirm": True}, {"confirm": "other"}):
+        assert request(server, path, payload)[0] == 400
+    assert server.store.get_scan(sid)["status"] == "queued"
+    assert request(server, path)[0] == 404
+    assert request(server, path, {"confirm": sid})[0] == 200
+    assert request(server, path, {"confirm": sid})[0] == 400
+    assert request(server, f"/api/scans/{sid}")[0] == 400
+
+
+def test_delete_clears_report_cache_and_saved_api_views(server, tmp_path):
+    server.engine = Engine(server.store, FakeOllama)
+    sid = server.engine.create(create_demo(tmp_path / "completed-delete-source"), "Delete", DEFAULTS)
+    wait(server.engine)
+    request(server, f"/api/scans/{sid}")
+    assert sid in server.stats_cache
+    code, body, _ = request(server, f"/api/scans/{sid}/delete", {"confirm": sid})
+    assert code == 200 and json.loads(body)["deleted"]
+    assert sid not in server.stats_cache
+    for suffix in ("", "/tree", "/summary", "/graph", "/comprehensive.html", "/report.json"):
+        assert request(server, f"/api/scans/{sid}{suffix}")[0] == 400
+    assert sid not in [s["id"] for s in json.loads(request(server, "/api/scans")[1])["scans"]]
+
+
+def test_running_delete_returns_pending_until_current_request_finishes(server, tmp_path):
+    entered, release = threading.Event(), threading.Event()
+
+    class BlockingModel(FakeOllama):
+        def analyze(self, evidence, timeout=None):
+            entered.set()
+            assert release.wait(10)
+            return super().analyze(evidence, timeout)
+
+    server.engine = Engine(server.store, BlockingModel)
+    sid = server.engine.create(create_demo(tmp_path / "active-delete-source"), "Active", DEFAULTS)
+    try:
+        assert entered.wait(10)
+        code, body, _ = request(server, f"/api/scans/{sid}/delete", {"confirm": sid})
+        assert code == 202 and json.loads(body)["pending"]
+        assert json.loads(request(server, f"/api/scans/{sid}")[1])["scan"]["status"] == "deleting"
+    finally:
+        release.set()
+    wait(server.engine)
+    assert request(server, f"/api/scans/{sid}")[0] == 400
+
+
+def test_eject_api_requires_session_and_specific_confirmation(server, tmp_path, monkeypatch):
+    from drivestigate import drives
+
+    server.engine.hold_queue(True)
+    sid = server.engine.create(create_demo(tmp_path / "eject-source"), "Eject", DEFAULTS)
+    calls = []
+
+    def eject(engine, scan_id):
+        calls.append(scan_id)
+        return {"ejected": True, "volume": "Synthetic"}
+
+    monkeypatch.setattr(drives, "eject_drive", eject)
+    path = f"/api/scans/{sid}/eject"
+    assert request(server, path, {"confirm": sid}, auth=False)[0] == 403
+    assert request(server, path, {})[0] == 400
+    assert request(server, path, {"confirm": "other"})[0] == 400
+    assert not calls
+    assert request(server, path, {"confirm": sid})[0] == 200
+    assert calls == [sid] and server.store.get_scan(sid)["status"] == "queued"

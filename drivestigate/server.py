@@ -160,7 +160,13 @@ class Handler(BaseHTTPRequestHandler):
                             pass
                 return self.reply({"volumes": roots})
             if path == "/api/scans":
-                return self.reply({"scans": store.scans(), "version": __version__})
+                return self.reply(
+                    {
+                        "scans": store.scans(),
+                        "version": __version__,
+                        "eject_supported": sys.platform == "darwin",
+                    }
+                )
             if path == "/api/queue":
                 return self.reply(store.queue())
             segments = path.strip("/").split("/")
@@ -378,8 +384,20 @@ class Handler(BaseHTTPRequestHandler):
             segments = path.strip("/").split("/")
             if len(segments) == 4 and segments[:2] == ["api", "scans"]:
                 scan_id, action = segments[2:]
-                if action in {"pause", "stop"}:
+                if action == "delete":
+                    if data.get("confirm") != scan_id:
+                        raise ValueError("Confirm deletion of this investigation.")
+                    result = engine.delete(scan_id)
+                    self.server.stats_cache.pop(scan_id, None)
+                    return self.reply(result, 202 if result["pending"] else 200)
+                elif action in {"pause", "stop"}:
                     engine.interrupt(scan_id, stop=action == "stop")
+                elif action == "eject":
+                    from .drives import eject_drive
+
+                    if data.get("confirm") != scan_id:
+                        raise ValueError("Confirm ejection of this investigation's source drive.")
+                    return self.reply(eject_drive(engine, scan_id))
                 elif action == "resume":
                     engine.start(scan_id)
                 elif action == "summary":

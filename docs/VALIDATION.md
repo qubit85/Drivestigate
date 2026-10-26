@@ -1,4 +1,4 @@
-# Drivestigate 1.3.0 validation
+# Drivestigate 1.4.0 validation
 
 Validated on 2026-10-26 on an Apple Silicon Mac, using Python 3.12 and the locally
 installed model `qwen35-9b-alltag-64k:latest` through the local Ollama MLX runner.
@@ -6,7 +6,7 @@ Only synthetic sources were used for acceptance testing.
 
 ## Automated checks
 
-- **74 tests passed**, including the existing inventory, source integrity, budget,
+- **94 tests passed**, including the existing inventory, source integrity, budget,
   disconnect, extraction, model validation and local-session security checks.
 - New checks cover persistent queue order, stale/repeated ID rejection, enqueueing
   while busy, automatic continuation, disconnected-job bypass and restart recovery.
@@ -21,6 +21,30 @@ Only synthetic sources were used for acceptance testing.
 - HTML/CSV/JSON detail reports include the file coverage ledger and known file links.
 - Ruff lint/format, Node 22 syntax checks for all browser scripts and `pip check` passed.
 - CI defines Linux/macOS checks on Python 3.11, 3.12 and 3.14, plus wheel/source builds.
+
+## Investigation management checks
+
+- Deletion cascades through one investigation's inventory, findings, file details,
+  events and saved report, preserves other investigations, and clears cached report
+  data. Tests verify unchanged source bytes/mtime and preserved edited vault notes.
+- Queued and disconnected investigations can be deleted. Active deletion returns
+  pending until its worker exits, blocks resume, handles inference failure, continues
+  the queue, and survives restart. Session, origin, CSRF and specific-ID confirmation
+  checks apply to the deletion API.
+- Eject tests simulate macOS responses: the app requires an idle worker, checks the
+  source identity twice, verifies external/ejectable device flags and mount identity,
+  rejects internal disks and unsafe device identifiers, and never forces unmounting.
+  Physical drive ejection was not performed during these tests.
+- Browser checks verify Delete in the overview/report, cancel and Escape behavior,
+  and the eject confirmation. Sidebar Pause/Resume changed a synthetic investigation
+  between paused and queued while the queue was held. Status badges distinguish these
+  states. Progress-only updates preserve sidebar controls and keyboard focus.
+- Screenshots in `docs/screenshots/delete-investigation.png`, `eject-drive.png` and
+  `sidebar-controls.png` contain synthetic investigations only.
+- The ad-hoc signed 1.4.0 app and wheel were rebuilt and checked. The live app shows
+  all new controls without horizontal overflow. Its four saved investigations and
+  their stopped/paused/completed states survived migration to catalog schema 4;
+  the catalog was backed up before the upgrade.
 
 ## Folder summary checks
 

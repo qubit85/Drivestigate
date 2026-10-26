@@ -5,7 +5,7 @@ const token = document.querySelector('meta[name="drivestigate-token"]').content;
 const state = {settings: null, defaults: null, depths: null, scans: [], selected: null, scan: null,
   connected: false, offset: 0, query: "", priority: "", view: "overview", profiles: [], polling: false};
 const statusNames = {running: "Running", paused: "Paused", completed: "Run complete", stopped: "Stopped",
-  pausing: "Pausing", stopping: "Stopping", queued: "Queued", waiting: "Waiting for drive"};
+  pausing: "Pausing", stopping: "Stopping", deleting: "Deleting…", queued: "Queued", waiting: "Waiting for drive"};
 const depthNames = {quick: "Quick", balanced: "Balanced", thorough: "Thorough"};
 const methodNames = {metadata: "Metadata · awaiting AI review", metadata_ai: "AI assessment based on metadata",
   sampled: "AI assessment with samples", detail: "All-file inspection ledger"};
@@ -61,25 +61,33 @@ function switchView(view) {
 }
 async function loadScans() {
   const data = await api("/api/scans");
-  if (state.scansLoaded && state.sidebarSelection === state.selected && JSON.stringify(data.scans) === JSON.stringify(state.scans)) {
+  state.ejectSupported = data.eject_supported;
+  if (state.selected && !data.scans.some(scan => scan.id === state.selected)) clearDeletedSelection(state.selected);
+  const sidebarKey = JSON.stringify(data.scans.map(scan => [scan.id, scan.name, scan.root, scan.created, scan.status]));
+  state.scans = data.scans;
+  if (state.scansLoaded && state.sidebarSelection === state.selected && sidebarKey === state.sidebarKey) {
     if (window.DriveViews) await window.DriveViews.refreshQueue();
     return;
   }
-  state.scans = data.scans;
-  state.scansLoaded = true; state.sidebarSelection = state.selected;
+  state.scansLoaded = true; state.sidebarSelection = state.selected; state.sidebarKey = sidebarKey;
   $("version").textContent = data.version;
   $("scan-count").textContent = data.scans.length;
   $("overview-count").textContent = `${data.scans.length} saved`;
   const list = $("scan-list"), cards = $("overview-scans");
   list.replaceChildren(); cards.replaceChildren();
   for (const scan of data.scans) {
-    const nav = button(scan.name, "scan-item" + (scan.id === state.selected ? " active" : ""), () => guarded(() => showReport(scan.id)));
-    nav.append(el("small", "", `${statusNames[scan.status] || scan.status} · ${date(scan.created)}`));
-    list.append(nav);
+    const nav = button("", "scan-item" + (scan.id === state.selected ? " active" : ""), () => guarded(() => showReport(scan.id)));
+    nav.disabled = scan.status === "deleting";
+    nav.append(el("span", "scan-nav-name", scan.name), el("span", `sidebar-status status-${scan.status}`, statusNames[scan.status] || scan.status));
+    const navRow = el("div", "scan-list-row");
+    navRow.classList.toggle("is-running", scan.status === "running");
+    navRow.append(nav, sidebarActions(scan)); list.append(navRow);
     const card = button("", "investigation-card", () => guarded(() => showReport(scan.id)));
+    card.disabled = scan.status === "deleting";
     const title = el("div"); title.append(el("h3", "", scan.name), el("p", "path", scan.root));
     const meta = el("div", "card-meta"); meta.append(el("span", "state-label", statusNames[scan.status] || scan.status), el("small", "", date(scan.created)));
-    card.append(title, meta); cards.append(card);
+    card.append(title, meta);
+    const cardRow = el("div", "investigation-row"); cardRow.append(card, deleteControl(scan)); cards.append(cardRow);
   }
   if (!data.scans.length) {
     const empty = el("div", "empty-state");
@@ -87,6 +95,54 @@ async function loadScans() {
       button("New investigation ↗", "text-button", newScan)); cards.append(empty);
   }
   if (window.DriveViews) await window.DriveViews.refreshQueue();
+}
+async function sidebarAction(scan, action) {
+  await api(`/api/scans/${scan.id}/${action}`, {});
+  if (scan.id === state.selected && state.view === "report") await refreshReport();
+  await loadScans();
+}
+function sidebarActions(scan) {
+  const actions = el("div", "sidebar-scan-actions");
+  const add = (label, action) => {
+    const control = button(label, "sidebar-scan-action", () => guarded(async () => {
+      control.disabled = true;
+      try { await sidebarAction(scan, action); } finally { control.disabled = false; }
+    }));
+    control.setAttribute("aria-label", `${label} investigation: ${scan.name}`); actions.append(control);
+  };
+  if (["running", "queued", "waiting"].includes(scan.status)) {
+    add("Pause", "pause"); add("Stop", "stop");
+  } else if (["paused", "stopped", "completed"].includes(scan.status)) {
+    add(scan.status === "completed" ? "Queue" : "Resume", "resume");
+  }
+  actions.append(deleteControl(scan, true));
+  return actions;
+}
+let deletionTarget = null, ejectionTarget = null, ejecting = false;
+function deleteControl(scan, compact = false) {
+  const control = button("Delete", compact ? "scan-delete" : "secondary danger", () => confirmDeletion(scan));
+  control.setAttribute("aria-label", `Delete investigation: ${scan.name}`);
+  control.disabled = scan.status === "deleting";
+  return control;
+}
+function clearDeletedSelection(id) {
+  if (state.selected !== id) return;
+  state.selected = null; state.scan = null; state.reportState = null;
+  if (window.DriveViews) window.DriveViews.reset(null);
+  if (window.FolderSummaries) window.FolderSummaries.reset(null, "");
+  for (const id of ["file-dialog", "evidence-dialog"]) if ($(id)?.open) $(id).close();
+  if (state.view === "report") { switchView("overview"); $("nav-overview").focus(); }
+}
+function confirmDeletion(scan) {
+  deletionTarget = scan.id;
+  $("delete-investigation-name").textContent = scan.name;
+  $("delete-investigation-path").textContent = scan.root;
+  const active = ["running", "pausing", "stopping"].includes(scan.status);
+  $("delete-investigation-active").hidden = !active;
+  $("confirm-delete-investigation").textContent = active ? "Stop and delete" : "Delete investigation";
+  $("confirm-delete-investigation").disabled = false;
+  $("cancel-delete-investigation").disabled = false;
+  $("delete-investigation-dialog").showModal();
 }
 async function checkConnection() {
   try {
@@ -126,15 +182,21 @@ async function showReport(id) {
 async function refreshReport() {
   const id = state.selected;
   if (!id) return;
-  const data = await api(`/api/scans/${id}`);
+  let data;
+  try { data = await api(`/api/scans/${id}`); }
+  catch (error) {
+    await loadScans();
+    if (id !== state.selected) return;
+    throw error;
+  }
   if (id !== state.selected) return;
-  if (state.scan?.id === id && data.scan.updated === state.scan.updated && data.connected === state.connected && data.report_state === state.reportState && !["running", "pausing", "stopping"].includes(data.scan.status)) return;
+  if (state.scan?.id === id && data.scan.updated === state.scan.updated && data.connected === state.connected && data.report_state === state.reportState && !["running", "pausing", "stopping", "deleting"].includes(data.scan.status)) return;
   state.scan = data.scan; state.connected = data.connected; state.reportState = data.report_state;
   const scan = data.scan, stats = data.stats;
   $("report-title").textContent = scan.name; $("report-root").textContent = scan.root;
   $("scan-status-text").textContent = scan.message || "Ready";
   $("scan-state").textContent = statusNames[scan.status] || scan.status;
-  const running = ["running", "pausing", "stopping"].includes(scan.status);
+  const running = ["running", "pausing", "stopping", "deleting"].includes(scan.status);
   const queued = ["queued", "waiting"].includes(scan.status);
   $("scan-status").classList.toggle("running", running);
   $("pause-scan").hidden = !running && !queued; $("stop-scan").hidden = !running && !queued;
@@ -142,6 +204,10 @@ async function refreshReport() {
   $("resume-scan").hidden = running || queued;
   $("resume-scan").textContent = scan.status === "completed" ? scan.settings.investigation_mode === "detail" ? "Rebuild Obsidian vault" : "Investigate remaining folders" : "Resume";
   $("resume-scan").disabled = !data.connected;
+  $("delete-scan").disabled = scan.status === "deleting";
+  $("eject-drive").hidden = !state.ejectSupported;
+  $("eject-drive").disabled = !data.connected || scan.status === "deleting";
+  $("eject-drive").title = data.connected ? "Safely eject this source drive from macOS" : "The source drive is disconnected";
   $("disconnected").hidden = data.connected;
   const metrics = $("metrics"); metrics.replaceChildren();
   for (const [title, value, note] of [["Files inventoried", num(stats.files), `${num(stats.directories)} folders discovered`],
@@ -299,6 +365,48 @@ $("new-form").onsubmit = event => {
 for (const [id, action] of [["pause-scan", "pause"], ["stop-scan", "stop"], ["resume-scan", "resume"]]) {
   $(id).onclick = () => guarded(async () => { await api(`/api/scans/${state.selected}/${action}`, {}); await refreshReport(); await loadScans(); });
 }
+$("delete-scan").onclick = () => { if (state.scan) confirmDeletion(state.scan); };
+$("eject-drive").onclick = () => {
+  if (!state.scan) return;
+  ejectionTarget = state.scan.id;
+  $("eject-source-path").textContent = state.scan.root;
+  $("eject-blocker").hidden = !state.scans.some(scan => ["running", "pausing", "stopping", "deleting"].includes(scan.status));
+  $("confirm-eject-drive").disabled = !$("eject-blocker").hidden;
+  $("eject-drive-dialog").showModal();
+};
+$("cancel-eject-drive").onclick = () => $("eject-drive-dialog").close();
+$("eject-drive-dialog").addEventListener("cancel", event => { if (ejecting) event.preventDefault(); });
+$("confirm-eject-drive").onclick = () => guarded(async () => {
+  const id = ejectionTarget;
+  if (!id || ejecting) return;
+  ejecting = true;
+  $("confirm-eject-drive").disabled = true;
+  $("cancel-eject-drive").disabled = true;
+  try {
+    await api(`/api/scans/${id}/eject`, {confirm: id});
+    $("eject-drive-dialog").close();
+    toast("Drive ejected. You can disconnect it; saved reports remain available.");
+    await refreshReport(); await loadScans();
+  } finally { ejecting = false; $("confirm-eject-drive").disabled = false; $("cancel-eject-drive").disabled = false; }
+});
+$("cancel-delete-investigation").onclick = () => $("delete-investigation-dialog").close();
+$("delete-investigation-dialog").addEventListener("cancel", event => { if ($("confirm-delete-investigation").disabled) event.preventDefault(); });
+$("confirm-delete-investigation").onclick = () => guarded(async () => {
+  const id = deletionTarget;
+  if (!id || $("confirm-delete-investigation").disabled) return;
+  $("confirm-delete-investigation").disabled = true;
+  $("cancel-delete-investigation").disabled = true;
+  try {
+    const result = await api(`/api/scans/${id}/delete`, {confirm: id});
+    $("delete-investigation-dialog").close(); deletionTarget = null;
+    clearDeletedSelection(id);
+    await loadScans();
+    toast(result.pending ? "Deletion requested. Waiting for the current operation to finish safely." : "Investigation deleted. Source files and exported vaults were kept.");
+  } finally {
+    $("confirm-delete-investigation").disabled = false;
+    $("cancel-delete-investigation").disabled = false;
+  }
+});
 let searchTimer;
 $("finding-search").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => {
   state.query = $("finding-search").value; state.offset = 0; guarded(loadFindings);
@@ -345,8 +453,8 @@ async function init() {
   const params = new URLSearchParams(location.search);
   if (params.has("scan")) {
     await showReport(params.get("scan"));
-    if (params.has("folder")) { const folder = await api(`/api/scans/${state.selected}/directory/${Number(params.get("folder"))}`); window.DriveViews.exploreFolder(folder.rel); }
-    if (params.has("finding")) {
+    if (state.selected && params.has("folder")) { const folder = await api(`/api/scans/${state.selected}/directory/${Number(params.get("folder"))}`); window.DriveViews.exploreFolder(folder.rel); }
+    if (state.selected && params.has("finding")) {
       $("individual-findings").open = true;
       const finding = await api(`/api/scans/${state.selected}/finding/${Number(params.get("finding"))}`);
       let card = $(`finding-${finding.id}`);
@@ -355,7 +463,7 @@ async function init() {
     }
   }
   setInterval(async () => {
-    if (document.hidden || state.polling || $("settings-dialog").open) return;
+    if (document.hidden || state.polling || $("settings-dialog").open || $("delete-investigation-dialog").open) return;
     state.polling = true;
     try {
       if (state.view === "report") await refreshReport();
