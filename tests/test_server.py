@@ -168,3 +168,21 @@ def test_comprehensive_report_routes_include_saved_and_portable_views(server, tm
     assert request(server, f"/api/scans/{sid}/summary", {})[0] == 200
     wait(server.engine)
     assert server.store.get_scan(sid)["status"] == "completed"
+
+
+def test_folder_summary_api_is_authenticated_and_scoped(server, tmp_path):
+    server.engine = Engine(server.store, FakeOllama)
+    root = create_demo(tmp_path / "folder-summary-source")
+    sid = server.engine.create(root, "Folder summaries", {**DEFAULTS, "max_folders": 1})
+    wait(server.engine)
+    parent = json.loads(request(server, f"/api/scans/{sid}/tree")[1])["items"][0]
+    path = f"/api/scans/{sid}/directory/{parent['id']}/summary"
+    data = json.loads(request(server, path)[1])
+    assert data["summary"] and data["coverage"] and data["inventory"]["files"] == 13
+    assert request(server, path, auth=False)[0] == 403
+    assert request(server, f"/api/scans/{sid}/directory/-1/summary")[0] == 400
+    other = server.engine.create(root, "Another scan", {**DEFAULTS, "max_folders": 1})
+    wait(server.engine)
+    assert request(server, f"/api/scans/{other}/directory/{parent['id']}/summary")[0] == 400
+    root.rename(tmp_path / "offline-folder-summary-source")
+    assert request(server, path)[0] == 200

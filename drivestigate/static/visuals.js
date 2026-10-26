@@ -111,6 +111,7 @@ window.DriveViews = (() => {
   }
   async function update(data) {
     if (view.id !== data.scan.id) reset(data.scan.id);
+    if (window.FolderSummaries) window.FolderSummaries.reset(data.scan.id, data.scan.updated);
     progress(data);
     if (view.tab === "folder") await refreshTree();
     else if (Date.now() - view.graphLoaded > 7000 || !view.graph) await loadGraph();
@@ -163,7 +164,9 @@ window.DriveViews = (() => {
       const choose = button(row.rel === "." ? state.scan.name : row.rel.split("/").pop(), "tree-name", () => guarded(async () => {
         view.folder = row.rel; if (!view.cache.has(row.rel)) await fetchTree(row.rel); renderTree(); renderMap();
       })); choose.title = `${row.rel} · ${folderState(row)} · ${row.processed_files}/${row.own_files} own files processed`;
-      line.append(expand, dot, choose, el("small", "", row.tree_files ? num(row.tree_files) : row.own_files ? num(row.own_files) : "")); item.append(line); tree.append(item);
+      if (window.FolderSummaries) { window.FolderSummaries.bind(choose, row); line.append(expand, dot, choose, window.FolderSummaries.info(row)); }
+      else line.append(expand, dot, choose);
+      line.append(el("small", "", row.tree_files ? num(row.tree_files) : row.own_files ? num(row.own_files) : "")); item.append(line); tree.append(item);
       if (view.expanded.has(row.rel)) {
         const cached = view.cache.get(row.rel);
         for (const child of cached?.items || []) if (child.rel !== row.rel) append(child, depth + 1);
@@ -195,6 +198,7 @@ window.DriveViews = (() => {
     $("map-up").disabled = view.folder === ".";
     const children = data.items.filter(r => r.rel !== view.folder);
     const own = data.items.find(r => r.rel === view.folder);
+    if (window.FolderSummaries) window.FolderSummaries.selected(own);
     const tiles = (children.length ? children.map(r => ({id: r.id, label: r.rel.split("/").pop(), rel: r.rel,
       bytes: r.tree_bytes || r.own_bytes, status: folderState(r), kind: "folder", row: r}))
       : data.files.map(f => ({id: f.id, label: f.name, rel: f.rel, bytes: f.size,
@@ -212,6 +216,7 @@ window.DriveViews = (() => {
       Object.assign(node.style, {left: `calc(${tile.x}% + 2px)`, top: `calc(${tile.y}% + 2px)`, width: `max(0px, calc(${tile.width}% - 4px))`, height: `max(0px, calc(${tile.height}% - 4px))`});
       node.title = `${tile.rel} · ${formatBytes(tile.bytes)} · ${tile.status}`;
       node.setAttribute("aria-label", node.title);
+      if (tile.kind === "folder" && window.FolderSummaries) window.FolderSummaries.bind(node, tile.row);
       const width = mapWidth * tile.width / 100 - 4, height = mapHeight * tile.height / 100 - 4;
       if (width >= 80 && height >= 42) {
         const content = el("div", "map-tile-content"); content.append(el("strong", "", tile.label));
@@ -221,7 +226,10 @@ window.DriveViews = (() => {
       }
       const entry = button("", "map-entry", () => node.click());
       entry.append(el("span", `folder-dot ${tile.status}`), el("span", "", tile.label), el("small", "", `${formatBytes(tile.bytes)} · ${tile.status}`));
-      entryList.append(entry);
+      if (tile.kind === "folder" && window.FolderSummaries) {
+        window.FolderSummaries.bind(entry, tile.row);
+        const entryRow = el("div", "map-entry-row"); entryRow.append(entry, window.FolderSummaries.info(tile.row)); entryList.append(entryRow);
+      } else entryList.append(entry);
       if (width > 0 && height > 0) map.append(node);
     }
     if (!tiles.length) map.append(el("div", "map-empty", state.scan.phase === "inventory" ? "Discovering this folder …" : "This folder has no inventoried regular files."));

@@ -1,4 +1,4 @@
-# Drivestigate 1.2.0 validation
+# Drivestigate 1.3.0 validation
 
 Validated on 2026-10-26 on an Apple Silicon Mac, using Python 3.12 and the locally
 installed model `qwen35-9b-alltag-64k:latest` through the local Ollama MLX runner.
@@ -6,7 +6,7 @@ Only synthetic sources were used for acceptance testing.
 
 ## Automated checks
 
-- **66 tests passed**, including the existing inventory, source integrity, budget,
+- **74 tests passed**, including the existing inventory, source integrity, budget,
   disconnect, extraction, model validation and local-session security checks.
 - New checks cover persistent queue order, stale/repeated ID rejection, enqueueing
   while busy, automatic continuation, disconnected-job bypass and restart recovery.
@@ -19,8 +19,24 @@ Only synthetic sources were used for acceptance testing.
   files are absent, excerpts are omitted by default, and rebuilding preserves older vaults.
 - Two local ports retain independent sessions in one browser cookie jar.
 - HTML/CSV/JSON detail reports include the file coverage ledger and known file links.
-- Ruff lint/format, Node 22 syntax checks for both scripts and `pip check` passed.
+- Ruff lint/format, Node 22 syntax checks for all browser scripts and `pip check` passed.
 - CI defines Linux/macOS checks on Python 3.11, 3.12 and 3.14, plus wheel/source builds.
+
+## Folder summary checks
+
+- Plain-text descriptions cover every cataloged directory, including roots, empty folders,
+  unreviewed parents, sampled folders and all-file per-file assessment results.
+- Tests verify literal wildcard/case-sensitive subtree boundaries, per-investigation ID
+  isolation, metadata-only labeling, sampled-content scope, skipped/unreadable paths,
+  authenticated API access, and unchanged source-read/model-call counters while offline.
+- Browser checks verify keyboard-focus tooltips, viewport containment, Escape dismissal,
+  full-summary dialogs, metadata-only descriptions, copy controls and selected-folder text.
+  Automatic scrolling when keyboard focus moves does not cancel the tooltip.
+- Source and model strings are inserted as plain text; no source/model HTML is executed.
+- The packaged 1.3.0 app serves folder summaries from the existing catalog. All four
+  saved investigations survived the update; the active all-file investigation was
+  paused at a checkpoint, backed up and resumed after the rebuild.
+- The tooltip screenshot in `docs/screenshots/folder-summary.png` uses synthetic data.
 
 ## Consolidated-report and map regression checks
 
@@ -58,9 +74,9 @@ Only synthetic sources were used for acceptance testing.
   vault ZIP contained human-readable file notes and the correct instance-port links.
 - The versioned, ad-hoc signed Mac bundle passed `codesign --verify --deep --strict`.
   The build guard rejected rebuilding while the packaged app was running.
-- The final app runs on port 8741 with the existing Application Support catalog. All
-  three saved investigations survived migration; an interrupted disconnected drive
-  investigation was restored to the waiting queue with its progress preserved.
+- The app runs on port 8741 with the existing Application Support catalog. The earlier
+  1.2.0 migration preserved saved investigations and returned an interrupted disconnected
+  investigation to the waiting queue with its progress preserved.
 
 ## Scale and release boundaries
 

@@ -120,6 +120,20 @@ Scan modes are now labeled **Sampled files** and **All files + Obsidian vault** 
 provides a button to prepare a new investigation in the other mode. Changing modes
 starts a separate catalog snapshot rather than changing how saved findings were obtained.
 
+Every folder now has a plain-text description. Hover or keyboard-focus its name in the
+folder tree, size map or entry list to see a tooltip; Escape dismisses it. Select **ⓘ**
+for the full text, **Copy summary** and Finder access. Opening a folder also shows its
+summary above the size map. The selected-folder preview is expandable and links to the
+full summary, so long descriptions do not overwhelm the map.
+
+Descriptions reuse saved sampled or per-file assessments when available. Unreviewed
+folders receive a clearly labeled filename/metadata summary with file types and example
+paths. Parent folders can show selected reviewed descendants without claiming the whole
+subtree was reviewed. Incomplete inventories, skipped paths and read issues remain
+explicit. Reading a folder summary requires no new source-file read or model request,
+and works with a disconnected source. Summaries are fetched on demand and cached until
+the investigation changes.
+
 The folder map scales labels to available tile space. Entries too small to draw remain
 accessible in the compact list below it, including on narrow screens.
 

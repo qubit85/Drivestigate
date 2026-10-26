@@ -115,6 +115,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/app.js",
                 "/visuals.js",
                 "/comprehensive.js",
+                "/folders.js",
                 "/report.css",
                 "/style.css",
                 "/icon.svg",
@@ -127,6 +128,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/app.js": "text/javascript",
                     "/visuals.js": "text/javascript",
                     "/comprehensive.js": "text/javascript",
+                    "/folders.js": "text/javascript",
                     "/report.css": "text/css",
                     "/style.css": "text/css",
                     "/icon.svg": "image/svg+xml",
@@ -191,6 +193,10 @@ class Handler(BaseHTTPRequestHandler):
                             render_report(data, self.server.origin, standalone=True),
                             mime="text/html; charset=utf-8",
                         )
+                if segments[3] == "directory" and len(segments) == 6 and segments[5] == "summary":
+                    from .folders import folder_summary
+
+                    return self.reply(folder_summary(store, scan_id, int(segments[4])))
                 if segments[3] == "directory" and len(segments) == 5:
                     with store.connect() as db:
                         row = db.execute(
