@@ -3,12 +3,15 @@ import json
 import pytest
 from test_engine import FakeOllama, wait
 
-from drivestigate.config import DEFAULTS
+from drivestigate.config import DEFAULTS as NEW_DEFAULTS
 from drivestigate.demo import create_demo
 from drivestigate.engine import Engine
 from drivestigate.llm import Ollama
 from drivestigate.store import Store
 from drivestigate.summary import catalog_report, render_report
+
+# Legacy-engine regression fixtures; progressive behavior has dedicated tests.
+DEFAULTS = {**NEW_DEFAULTS, "investigation_mode": "overview", "search_focus": ""}
 
 
 class ReportModel(FakeOllama):

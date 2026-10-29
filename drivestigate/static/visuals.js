@@ -5,7 +5,7 @@ window.DriveViews = (() => {
     queue: null, dragging: null, graph: null, positions: new Map(), selected: null, hover: null,
     zoom: 1, panX: 0, panY: 0, pointer: null, graphKey: "", graphLoaded: 0, nodePage: 0};
   const colors = {file: "#5b9877", folder: "#527e9d", topic: "#c49b4c", type: "#9c88b3", duplicate: "#c97468"};
-  const phaseNames = {inventory: "Discovering folders", analysis: "Adaptive investigation", detail: "All-file inspection",
+  const phaseNames = {progressive: "Discovery + AI investigation", inventory: "Discovering folders", analysis: "Adaptive investigation", detail: "All-file inspection",
     vault: "Building Obsidian vault", complete: "Investigation complete"};
   const seconds = n => n < 60 ? `${Math.max(0, Math.round(n))} sec` : n < 3600 ? `${Math.round(n / 60)} min` : `${(n / 3600).toFixed(1)} hr`;
   const isDetail = () => state.scan?.settings.investigation_mode === "detail";
@@ -30,7 +30,7 @@ window.DriveViews = (() => {
       card.draggable = canMove;
       const handle = el("span", "queue-handle", canMove ? "⠿" : "▶"); handle.setAttribute("aria-hidden", "true");
       const label = button(job.name, "queue-name", () => guarded(() => showReport(job.id)));
-      label.append(el("small", "", `${job.mode === "detail" ? "All-file detail" : "Adaptive overview"} · ${statusNames[job.status]}`));
+      label.append(el("small", "", `${job.mode === "progressive" ? "Progressive investigation" : job.mode === "detail" ? "Legacy detail" : "Legacy overview"} · ${statusNames[job.status]}`));
       const actions = el("div", "queue-actions");
       if (canMove) {
         const up = button("↑", "icon-button", () => moveJob(job.id, "up")); up.title = "Move investigation up";
@@ -59,13 +59,15 @@ window.DriveViews = (() => {
   function moveJob(id, direction) { guarded(async () => { await api("/api/queue/move", {id, direction}); await refreshQueue(); }); }
 
   function reset(id) {
+    if (window.SizeTree) window.SizeTree.reset(id);
     view.id = id; view.folder = "."; view.cache.clear(); view.expanded = new Set(["."]);
     view.graph = null; view.positions.clear(); view.graphKey = ""; view.graphLoaded = 0; view.selected = null;
     view.treeKey = ""; $("graph-search").value = "";
   }
   function progress(data) {
     const p = data.progress || {}, scan = data.scan;
-    const phases = isDetail() ? ["inventory", "detail", "vault", "complete"] : ["inventory", "analysis"];
+    const progressive = scan.settings.investigation_mode === "progressive";
+    const phases = progressive ? ["progressive"] : isDetail() ? ["inventory", "detail", "vault", "complete"] : ["inventory", "analysis"];
     const current = phases.indexOf(scan.phase), target = $("phase-steps"); target.replaceChildren();
     phases.forEach((phase, i) => target.append(el("span", "phase-step" + (i === current ? " current" : i < current ? " done" : ""),
       `${i < current ? "✓" : i + 1}  ${phaseNames[phase]}`)));
@@ -88,6 +90,17 @@ window.DriveViews = (() => {
       : scan.status === "completed" ? "Run finished" : ["queued", "waiting"].includes(scan.status) ? statusNames[scan.status]
       : scan.status !== "running" ? "Paused" : "Calculating …";
     $("eta-caption").textContent = p.eta_basis || "Time remaining in this phase; available after two completed units.";
+    if (progressive) {
+      $("phase-current").textContent = `${p.reader || "Reader ready"} · ${p.analyst || "AI ready"}`;
+      $("phase-counts").textContent = `${num(p.completed)} folders listed · ${num(p.discovered)} discovered · ${num(p.reviewed)} assessed · ${num(p.tasks?.deferred)} tasks deferred`;
+      $("eta-value").textContent = scan.status === "running" ? `${seconds(p.remaining_seconds || 0)} budget left` : "Round saved";
+      $("eta-caption").textContent = "Round budget · coverage of the whole drive is unknown";
+      $("phase-rate").textContent = `${seconds(p.elapsed_seconds || 0)} elapsed${p.ai_request_seconds ? " · AI request " + seconds(p.ai_request_seconds) : ""}`;
+      $("coverage-text").textContent = `${num(data.stats.files)} files discovered · ${num(data.stats.content_samples)} text samples · ${num(p.tasks?.pending)} queued tasks. Unlisted branches remain unknown.`;
+      $("coverage-fill").style.width = "0%";
+      const assessmentMetric = $("metrics").children[2];
+      assessmentMetric.querySelector("p").textContent = `of ${num(data.stats.directories)} discovered folders · coverage may grow`;
+    }
     if (data.report_state === "building") {
       $("phase-label").textContent = "Generating comprehensive report";
       $("phase-current").textContent = "Synthesizing saved findings and preparing visual breakdowns …";
@@ -97,7 +110,7 @@ window.DriveViews = (() => {
     }
     if (isDetail()) {
       const d = data.stats.detail;
-      $("coverage-text").textContent = `${num(d.processed)} / ${num(data.stats.files)} files processed · ${num(d.hashed)} full-byte fingerprints · ${num(d.ai_reviewed)} AI assessments · ${num(d.content_read)} readable content samples · ${num(d.errors)} read issues · ${num(d.duplicate_groups)} identical-byte groups`;
+      $("coverage-text").textContent = `${num(d.processed)} / ${num(data.stats.files)} files accounted for · ${num(d.grouped)} technical files grouped · ${num(d.hashed)} full-byte fingerprints · ${num(d.ai_reviewed)} AI assessments · ${num(d.content_read)} readable content samples · ${num(d.errors)} read issues · ${num(d.duplicate_groups)} identical-byte groups`;
       $("coverage-fill").style.width = data.stats.files ? `${100 * d.processed / data.stats.files}%` : "0%";
       const metric = (index, title, value, caption) => {
         const item = $("metrics").children[index];
@@ -113,12 +126,19 @@ window.DriveViews = (() => {
     if (view.id !== data.scan.id) reset(data.scan.id);
     if (window.FolderSummaries) window.FolderSummaries.reset(data.scan.id, data.scan.updated);
     progress(data);
-    if (view.tab === "folder") await refreshTree();
+    $("graph-tab").hidden = !isDetail();
+    $("refresh-structure").hidden = data.scan.settings.investigation_mode === "progressive";
+    if (view.tab === "graph" && !isDetail()) chooseTab("folder");
+    $("refresh-structure").disabled = ["running", "queued", "waiting", "pausing", "stopping", "deleting"].includes(data.scan.status);
+    if (view.tab === "size") await window.SizeTree.update(data.scan);
+    else if (view.tab === "folder") await refreshTree();
     else if (Date.now() - view.graphLoaded > 7000 || !view.graph) await loadGraph();
   }
   function folderState(row) {
     if (row.errors) return "error";
+    if (row.own_files && row.grouped_files === row.own_files) return "technical";
     if (row.own_files && row.processed_files === row.own_files) return "processed";
+    if (["defer", "summarize"].includes(row.decision)) return "deferred";
     if (row.analyzed) return "sampled";
     if (row.processed_files) return "partial";
     if (row.own_files && row.technical_files === row.own_files) return "technical";
@@ -199,6 +219,7 @@ window.DriveViews = (() => {
     const children = data.items.filter(r => r.rel !== view.folder);
     const own = data.items.find(r => r.rel === view.folder);
     if (window.FolderSummaries) window.FolderSummaries.selected(own);
+    const displayedSize = tile => tile.kind === "folder" && !tile.row.tree_complete ? tile.bytes ? "≥ " + formatBytes(tile.bytes) : "Unknown size" : formatBytes(tile.bytes);
     const tiles = (children.length ? children.map(r => ({id: r.id, label: r.rel.split("/").pop(), rel: r.rel,
       bytes: r.tree_bytes || r.own_bytes, status: folderState(r), kind: "folder", row: r}))
       : data.files.map(f => ({id: f.id, label: f.name, rel: f.rel, bytes: f.size,
@@ -214,18 +235,18 @@ window.DriveViews = (() => {
         view.folder = tile.rel; view.expanded.add(tile.rel); await fetchTree(tile.rel); renderTree(); renderMap();
       }));
       Object.assign(node.style, {left: `calc(${tile.x}% + 2px)`, top: `calc(${tile.y}% + 2px)`, width: `max(0px, calc(${tile.width}% - 4px))`, height: `max(0px, calc(${tile.height}% - 4px))`});
-      node.title = `${tile.rel} · ${formatBytes(tile.bytes)} · ${tile.status}`;
+      node.title = `${tile.rel} · ${displayedSize(tile)} · ${tile.status}`;
       node.setAttribute("aria-label", node.title);
       if (tile.kind === "folder" && window.FolderSummaries) window.FolderSummaries.bind(node, tile.row);
       const width = mapWidth * tile.width / 100 - 4, height = mapHeight * tile.height / 100 - 4;
       if (width >= 80 && height >= 42) {
         const content = el("div", "map-tile-content"); content.append(el("strong", "", tile.label));
-        if (height >= 65) content.append(el("small", "", formatBytes(tile.bytes)));
+        if (height >= 65) content.append(el("small", "", displayedSize(tile)));
         if (height >= 90) content.append(el("span", "", tile.status));
         node.append(content);
       }
       const entry = button("", "map-entry", () => node.click());
-      entry.append(el("span", `folder-dot ${tile.status}`), el("span", "", tile.label), el("small", "", `${formatBytes(tile.bytes)} · ${tile.status}`));
+      entry.append(el("span", `folder-dot ${tile.status}`), el("span", "", tile.label), el("small", "", `${displayedSize(tile)} · ${tile.status}`));
       if (tile.kind === "folder" && window.FolderSummaries) {
         window.FolderSummaries.bind(entry, tile.row);
         const entryRow = el("div", "map-entry-row"); entryRow.append(entry, window.FolderSummaries.info(tile.row)); entryList.append(entryRow);
@@ -233,14 +254,14 @@ window.DriveViews = (() => {
       if (width > 0 && height > 0) map.append(node);
     }
     if (!tiles.length) map.append(el("div", "map-empty", state.scan.phase === "inventory" ? "Discovering this folder …" : "This folder has no inventoried regular files."));
-    $("map-caption").textContent = `Area follows logical file size · up to 24 largest immediate entries · ${own ? num(own.own_files) : data.files.length} own files. Entries too small for a tile are accessible in the list. Colors describe own-file review.`;
+    $("map-caption").textContent = `Area follows discovered logical sizes (unknown folders use a placeholder) · up to 24 largest immediate entries · ${own ? num(own.own_files) : data.files.length} own files. Entries too small for a tile are accessible in the list. Colors describe own-file review.`;
     const files = $("folder-file-list"); files.replaceChildren();
     if (data.files.length) files.append(el("h3", "", "Files in this folder"));
     for (const file of data.files) {
       const row = button("", "folder-file", () => guarded(() => openFile(file.id)));
       row.append(el("span", "", file.name), el("small", "", `${formatBytes(file.size)} · ${file.state || "inventoried"}`)); files.append(row);
     }
-    if (own && own.own_files > 80) files.append(el("p", "hint", "Showing the 80 largest files here. Use the graph search to inspect other files."));
+    if (own && own.own_files > 80) files.append(el("p", "hint", "Showing the 80 largest files here. Use Size tree to browse all discovered files."));
   }
   async function openFile(id) {
     const data = await api(`/api/scans/${state.selected}/file/${id}`);
@@ -248,7 +269,7 @@ window.DriveViews = (() => {
     target.append(el("p", "path", absolutePath(data.rel)), el("span", "state-label", `${data.state || "Inventoried"} · ${data.content_status || "No content inspection yet"}`),
       el("h3", "", "Assessment"), el("p", "", data.summary || "This file has not received a detail assessment yet."), el("p", "hint", data.reason || ""));
     if (data.error) target.append(el("p", "notice", data.error));
-    target.append(el("h3", "", "Full-byte SHA-256"), el("code", "fingerprint", data.sha256 || "No completed fingerprint."));
+    if (isDetail() || data.sha256) target.append(el("h3", "", "Full-byte SHA-256"), el("code", "fingerprint", data.sha256 || "No completed fingerprint."));
     if (data.topics.length) target.append(el("h3", "", "AI-suggested topics"), el("p", "", data.topics.join(" · ")));
     if (data.excerpt) target.append(el("h3", "", "Evidence excerpt / reader status"), el("pre", "", data.excerpt));
     const actions = el("div", "file-actions"); const revealButton = button("Reveal in Finder ↗", "primary", () => reveal("file", data.id)); revealButton.disabled = !state.connected;
@@ -259,8 +280,9 @@ window.DriveViews = (() => {
   function chooseTab(tab) {
     view.tab = tab;
     $("folder-panel").hidden = tab !== "folder"; $("graph-panel").hidden = tab !== "graph";
+    $("size-tree-panel").hidden = tab !== "size"; $("size-tree-tab").setAttribute("aria-selected", tab === "size");
     $("folder-tab").setAttribute("aria-selected", tab === "folder"); $("graph-tab").setAttribute("aria-selected", tab === "graph");
-    guarded(tab === "folder" ? refreshTree : loadGraph);
+    guarded(tab === "size" ? () => window.SizeTree.update(state.scan) : tab === "folder" ? refreshTree : loadGraph);
   }
   async function loadGraph() {
     if (!view.id) return;
@@ -421,6 +443,8 @@ window.DriveViews = (() => {
   }
   $("hold-queue").onclick = () => guarded(async () => { await api("/api/queue/hold", {paused: !view.queue?.paused}); await refreshQueue(); });
   $("folder-tab").onclick = () => chooseTab("folder"); $("graph-tab").onclick = () => chooseTab("graph");
+  $("size-tree-tab").onclick = () => chooseTab("size");
+  $("refresh-structure").onclick = () => guarded(async () => { await api(`/api/scans/${state.selected}/structure`, {}); toast("Recognizing folder roles from the saved catalog. Source content is not read."); await refreshReport(); await loadScans(); });
   $("map-up").onclick = () => guarded(async () => { view.folder = view.folder.includes("/") ? view.folder.slice(0, view.folder.lastIndexOf("/")) : "."; await fetchTree(view.folder); renderTree(); renderMap(); });
   $("graph-fit").onclick = fitGraph; $("graph-refresh").onclick = () => guarded(loadGraph);
   $("graph-limit").onchange = () => guarded(loadGraph);

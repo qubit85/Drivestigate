@@ -4,6 +4,8 @@ import sys
 
 if len(sys.argv) > 1 and sys.argv[1] == "--extract-worker":
     from drivestigate.extract import main
+elif len(sys.argv) > 1 and sys.argv[1] == "--discover-worker":
+    from drivestigate.discovery import main
 else:
     from drivestigate.server import main
 

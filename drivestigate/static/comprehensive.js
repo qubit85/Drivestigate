@@ -3,12 +3,13 @@ window.DriveReport = (() => {
   let key = "", selected = null;
   const requested = new Set();
   async function update(data) {
-    const scan = data.scan, detail = scan.settings.investigation_mode === "detail";
-    $("current-mode").textContent = detail ? "All files" : "Sampled files";
-    $("current-mode-description").textContent = detail
-      ? "Every inventoried file is processed. Supported bounded content or metadata is assessed individually."
+    const scan = data.scan, detail = scan.settings.investigation_mode === "detail", progressive = scan.settings.investigation_mode === "progressive";
+    $("current-mode").textContent = progressive ? "Progressive investigation" : detail ? scan.settings.detail_include_technical ? "All files · including technical" : "Detailed review · personal data first" : "Sampled files";
+    $("current-mode-description").textContent = progressive ? "Discovery, selective reading and local AI run together. Each round adds evidence and updates this report." : detail
+      ? scan.settings.detail_include_technical ? "All inventoried files receive fingerprints and individual bounded assessments, including technical files." : "Personal files receive fingerprints and bounded assessments. Recognized technical files are grouped from metadata without individual content reads."
       : "Every file is inventoried; selected files are sampled for content assessment.";
-    $("alternate-mode").textContent = detail ? "Start sampled investigation …" : "Start all-file investigation …";
+    $("alternate-mode").textContent = "New progressive investigation …";
+    $("alternate-mode").hidden = progressive;
     selected = scan.id;
     const next = `${scan.id}:${scan.updated}:${data.report_state}`;
     if (key === next) return;
@@ -22,6 +23,7 @@ window.DriveReport = (() => {
     $("generate-summary").textContent = report.state === "ready" ? "Regenerate report" : "Generate report";
     $("download-summary").href = `/api/scans/${scan.id}/comprehensive.html`;
     const captions = {
+      live: "Live report · updated from new evidence while discovery and analysis continue.",
       ready: `Generated report · ${report.synthesis === "local_ai" ? "local AI synthesis" : "catalog synthesis"}. Open the standalone report to save or print it.`,
       building: "Generating the final report from saved findings …",
       stale: "Previous report snapshot. A fresh report is generated when this investigation finishes.",
@@ -36,11 +38,9 @@ window.DriveReport = (() => {
     }
   }
   $("alternate-mode").onclick = () => guarded(async () => {
-    const scan = state.scan, mode = scan.settings.investigation_mode === "detail" ? "overview" : "detail";
+    const scan = state.scan;
     await newScan();
-    $("scan-root").value = scan.root; $("scan-name").value = `${scan.name} · ${mode === "detail" ? "All files" : "Sampled files"}`.slice(0,100);
-    const option = document.querySelector(`input[name="investigation-mode"][value="${mode}"]`);
-    option.checked = true; option.dispatchEvent(new Event("change"));
+    $("scan-root").value = scan.root; $("scan-name").value = `${scan.name} · Progressive`.slice(0,100);
     document.querySelector(".mode-choice").scrollIntoView({block:"center",behavior:"smooth"});
   });
   $("generate-summary").onclick = () => guarded(async () => {

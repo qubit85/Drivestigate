@@ -2,8 +2,12 @@ import json
 
 import pytest
 
-from drivestigate.config import DEFAULTS, validate_settings
+from drivestigate.config import DEFAULTS as NEW_DEFAULTS
+from drivestigate.config import validate_settings
 from drivestigate.llm import Ollama, OllamaError
+
+# Legacy-engine regression fixtures; progressive behavior has dedicated tests.
+DEFAULTS = {**NEW_DEFAULTS, "investigation_mode": "overview", "search_focus": ""}
 
 
 def valid_result():

@@ -6,11 +6,14 @@ import urllib.request
 import pytest
 from test_engine import FakeOllama, wait
 
-from drivestigate.config import DEFAULTS
+from drivestigate.config import DEFAULTS as NEW_DEFAULTS
 from drivestigate.demo import create_demo
 from drivestigate.engine import Engine
 from drivestigate.server import AppServer
 from drivestigate.store import Store
+
+# Legacy-engine regression fixtures; progressive behavior has dedicated tests.
+DEFAULTS = {**NEW_DEFAULTS, "investigation_mode": "overview", "search_focus": ""}
 
 
 @pytest.fixture
@@ -268,3 +271,40 @@ def test_eject_api_requires_session_and_specific_confirmation(server, tmp_path, 
     assert not calls
     assert request(server, path, {"confirm": sid})[0] == 200
     assert calls == [sid] and server.store.get_scan(sid)["status"] == "queued"
+
+
+def test_size_tree_and_structure_refresh_api(server, tmp_path):
+    server.engine = Engine(server.store, FakeOllama)
+    root = create_demo(tmp_path / "size-tree-source")
+    sid = server.engine.create(root, "Size tree", DEFAULTS)
+    wait(server.engine)
+    before = server.store.get_scan(sid)
+    assert request(server, f"/api/scans/{sid}/size-tree", auth=False)[0] == 403
+    data = json.loads(request(server, f"/api/scans/{sid}/size-tree")[1])
+    assert data["root"]["tree_bytes"] == server.store.stats(sid)["bytes"]
+    assert {r["kind"] for r in data["items"]} == {"file", "directory"}
+    assert request(server, f"/api/scans/{sid}/size-tree?parent=../../etc")[0] == 400
+    assert request(server, f"/api/scans/{sid}/size-tree?sort=bad")[0] == 400
+    root.rename(tmp_path / "offline-size-tree")
+    assert request(server, f"/api/scans/{sid}/structure", {}, auth=False)[0] == 403
+    assert request(server, f"/api/scans/{sid}/structure", {})[0] == 200
+    wait(server.engine)
+    after = server.store.get_scan(sid)
+    assert after["status"] == before["status"] and after["phase"] == before["phase"]
+    assert after["llm_calls"] == before["llm_calls"] and after["read_bytes"] == before["read_bytes"]
+
+
+def test_progressive_focus_route_is_authenticated_and_preserves_evidence(server, tmp_path):
+    from test_progressive import Planner
+
+    server.engine.client_factory = Planner
+    root = create_demo(tmp_path / "progressive-source")
+    sid = server.engine.create(root, "Progressive API", {**NEW_DEFAULTS, "max_llm_calls": 2})
+    wait(server.engine)
+    read = server.store.get_scan(sid)["read_bytes"]
+    response, _, _ = request(server, f"/api/scans/{sid}/focus", {"search_focus": "Projects"}, auth=False)
+    assert response == 403
+    response, _, _ = request(server, f"/api/scans/{sid}/focus", {"search_focus": "Projects"})
+    assert response == 200
+    assert server.store.get_scan(sid)["settings"]["search_focus"] == "Projects"
+    assert server.store.get_scan(sid)["read_bytes"] == read

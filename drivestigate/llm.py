@@ -103,6 +103,11 @@ class Ollama:
             raise ValueError("Only locally stored models may process file contents.")
         return {"ok": True, "model": self.settings["model"], "capabilities": info.get("capabilities", [])}
 
+    def plan(self, evidence, timeout=None):
+        from .planner import plan
+
+        return plan(self, evidence, timeout)
+
     def analyze(self, evidence, timeout=None):
         return self._analyze(evidence, SCHEMA, timeout)
 

@@ -32,6 +32,7 @@ def folder_summary(store, scan_id, directory_id):
                 "COALESCE(SUM(x.state IN ('reviewed','metadata','error')),0) processed,"
                 "COALESCE(SUM(x.state='reviewed'),0) ai_files,"
                 "COALESCE(SUM(x.content_status IN ('excerpt','image')),0) content_samples,"
+                "COALESCE(SUM(x.content_status='grouped'),0) grouped,"
                 "COALESCE(SUM(x.error!='' OR x.state='error'),0) read_issues "
                 "FROM files f LEFT JOIN file_details x ON x.file_id=f.id WHERE f.scan_id=? AND " + file_scope,
                 (scan_id, *file_args),
@@ -181,8 +182,18 @@ def folder_summary(store, scan_id, directory_id):
             summary += "\n\nExample paths from the inventory: " + "; ".join(examples) + "."
         if children:
             summary += "\nSubfolders include: " + ", ".join(PurePosixPath(c).name for c in children) + "."
+    if folder.get("role") in {"application", "system", "dependencies", "cache"}:
+        from .structure import LABELS
+
+        summary = (
+            f"{LABELS[folder['role']]} recognized from directory layout. {folder['role_reason']}\n\n"
+            + summary
+        )
+        if not evidence:
+            basis = "Recognized structure · metadata only"
     if scan["settings"].get("investigation_mode") == "detail":
         coverage = f"{counts['processed']:,} / {counts['files']:,} files processed across this subtree; {counts['ai_files']:,} AI assessments, {counts['content_samples']:,} readable content samples. Supported content is bounded; fingerprints do not prove semantic understanding."
+        coverage += f" {counts['grouped']:,} technical files were grouped without individual content reads."
     else:
         coverage = f"{assessed['assessed']:,} / {assessed['relevant']:,} relevant folders assessed across this subtree."
         if own:
@@ -191,6 +202,13 @@ def folder_summary(store, scan_id, directory_id):
             coverage += " Subfolder examples are selected evidence, not a full review of this parent folder."
         else:
             coverage += " Contents have not been established from reviewed evidence; file types and example paths are metadata."
+    if scan["settings"].get("investigation_mode") == "progressive":
+        coverage += (
+            " Decision: "
+            + (folder.get("decision") or "awaiting evidence")
+            + ". "
+            + folder.get("uncertainty", "")
+        )
     if directories["pending"]:
         coverage += f" Inventory is still incomplete in {directories['pending']:,} discovered folders."
     if counts["read_issues"]:

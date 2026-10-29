@@ -9,6 +9,7 @@ from .store import now
 def catalog_report(store, scan_id):
     scan, stats = store.get_scan(scan_id), store.stats(scan_id)
     detail = scan["settings"].get("investigation_mode") == "detail"
+    progressive = scan["settings"].get("investigation_mode") == "progressive"
     with store.connect() as db:
         areas = [
             dict(r)
@@ -57,9 +58,9 @@ def catalog_report(store, scan_id):
                 for r in db.execute(
                     "SELECT a.id,'finding' kind,d.rel,COUNT(f.id) files,COALESCE(SUM(f.size),0) bytes,"
                     "a.priority,a.summary,a.reason FROM findings a JOIN directories d ON d.id=a.dir_id "
-                    "LEFT JOIN files f ON f.dir_id=d.id WHERE a.scan_id=? AND a.analyzed=1 AND a.priority<=2 GROUP BY a.id "
+                    "LEFT JOIN files f ON f.dir_id=d.id WHERE a.scan_id=? AND a.analyzed=1 AND a.priority<=2 GROUP BY a.id HAVING SUM(f.technical=0)>0 OR ? "
                     "ORDER BY a.priority,bytes DESC LIMIT 120",
-                    (scan_id,),
+                    (scan_id, int(progressive)),
                 )
             ]
             priorities = [
@@ -108,7 +109,7 @@ def catalog_report(store, scan_id):
             f"{r['rel']}: {r['summary'][:320]}" for r in leads[:3]
         )
     caveat = (
-        "All-file processing attempts every inventoried regular file. Full-byte fingerprints do not establish "
+        "Every inventoried file is accounted for; recognized technical material may be grouped without content reads or hashes. Full-byte fingerprints do not establish "
         "complete semantic understanding; AI sees supported bounded content or metadata."
         if detail
         else "Content conclusions come from selected samples. An inventoried folder has not necessarily been assessed by AI."
@@ -120,14 +121,14 @@ def catalog_report(store, scan_id):
     if not detail and stats["analyzed_folders"] < stats["findings"]:
         next_steps.insert(
             0,
-            "Resume the sampled investigation to assess the remaining relevant folders, or start an all-file investigation.",
+            "Continue deepening to explore remaining folders and review more evidence.",
         )
-    return {
+    report = {
         "version": 1,
         "scan_id": scan_id,
         "name": scan["name"],
         "root": scan["root"],
-        "mode": "detail" if detail else "overview",
+        "mode": "detail" if detail else "progressive" if progressive else "overview",
         "generated": now(),
         "scan_status": scan["status"],
         "stats": stats,
@@ -137,11 +138,41 @@ def catalog_report(store, scan_id):
         "leads": leads,
         "summary": summary,
         "basis": "Compiled from catalog totals and saved assessments.",
-        "caveat": caveat,
+        "caveat": (
+            "Only discovered entries contribute to sizes and charts. Unlisted branches remain unknown; summaries describe metadata or selected samples, never exhaustive content coverage. "
+            if progressive
+            else ""
+        )
+        + caveat,
         "next_steps": next_steps,
         "synthesis": "catalog",
         "ai_error": "",
+        "structure": store.structure(scan_id),
     }
+
+    if progressive:
+        import json
+
+        with store.connect() as db:
+            row = db.execute(
+                "SELECT payload FROM investigation_memory WHERE scan_id=?", (scan_id,)
+            ).fetchone()
+            memory = json.loads(row[0]) if row else {}
+            tasks = {
+                r[0]: r[1]
+                for r in db.execute(
+                    "SELECT state,COUNT(*) FROM investigation_tasks WHERE scan_id=? GROUP BY state",
+                    (scan_id,),
+                )
+            }
+        report["investigation"] = {**memory, "tasks": tasks, "ai_error": scan["progress"].get("ai_error", "")}
+        if memory.get("overview"):
+            report.update(
+                summary=memory["overview"],
+                basis="Evolving interpretation of referenced evidence. Coverage is partial.",
+                synthesis="local_ai",
+            )
+    return report
 
 
 def generate_report(engine, scan_id):
@@ -149,14 +180,27 @@ def generate_report(engine, scan_id):
 
     store, scan = engine.store, engine.store.get_scan(scan_id)
     report = catalog_report(store, scan_id)
+    if report["mode"] == "progressive":
+        store.save_report(scan_id, report)
+        return report
     store.save_report(scan_id, report, state="building")
     if engine.control.is_set():
         raise Interrupted()
     settings = scan["settings"]
     use_ai = report["mode"] != "detail" or settings.get("detail_use_llm", True)
-    client = engine.client_factory(settings) if use_ai else None
+    client = engine.client_factory(settings) if use_ai and report["leads"] else None
     if client and hasattr(client, "summarize_report") and report["leads"]:
         evidence = {
+            "recognized_structure": {
+                "groups": [
+                    {"role": g["role"], "name": g["label"], "path": g["rel"], "basis": g["basis"]}
+                    for g in report.get("structure", {}).get("groups", [])[:30]
+                ],
+                "user_locations": [
+                    {"path": p["rel"], "role": p["role"]}
+                    for p in report.get("structure", {}).get("user_locations", [])[:15]
+                ],
+            },
             "scope": "Synthesis of the saved investigation, not new source-file inspection. All totals cover the catalog; examples are bounded.",
             "review_unit": "individual files"
             if report["mode"] == "detail"
@@ -241,16 +285,97 @@ def render_report(data, origin, standalone=False):
             for r in rows
         )
 
+    investigation = data.get("investigation", {})
+    progressive = data["mode"] == "progressive"
+    live_sections = []
+    if progressive:
+        live_sections.append(
+            '<section class="report-section"><h3>Working understanding</h3><p>Evidence-backed hypotheses evolve as discovery continues. Sizes refer to discovered entries.</p>'
+        )
+        if investigation.get("references"):
+            live_sections.append(
+                "<p>Based on: "
+                + " · ".join(
+                    path_link({"id": did, "kind": "directory", "rel": "Folder evidence"})
+                    for did in investigation["references"]
+                )
+                + "</p>"
+            )
+        if investigation.get("questions"):
+            live_sections.append(
+                "<h4>Open questions</h4><ul>"
+                + "".join("<li>" + esc(q) + "</li>" for q in investigation["questions"])
+                + "</ul>"
+            )
+        if investigation.get("ai_error"):
+            live_sections.append(
+                '<p class="report-provenance">AI needs attention: '
+                + esc(investigation["ai_error"])
+                + ". Saved evidence remains available.</p>"
+            )
+        if investigation.get("changes"):
+            live_sections.append(
+                "<details><summary>Recent understanding updates</summary><ul>"
+                + "".join(
+                    "<li>"
+                    + path_link({"id": c["directory_id"], "kind": "directory", "rel": c["path"]})
+                    + ": "
+                    + esc(c["summary"])
+                    + "</li>"
+                    for c in investigation["changes"][-8:][::-1]
+                )
+                + "</ul></details>"
+            )
+        tasks = investigation.get("tasks", {})
+        live_sections.append(
+            "<p>"
+            + esc(
+                f"{tasks.get('pending', 0)} queued tasks · {tasks.get('deferred', 0)} deferred tasks · {tasks.get('error', 0)} read issues. Continue deepening adds another bounded round."
+            )
+            + "</p></section>"
+        )
     reviewed = stats["detail"]["processed"] if data["mode"] == "detail" else stats["analyzed_folders"]
-    total = stats["files"] if data["mode"] == "detail" else stats["findings"]
+    total = (
+        stats["files"]
+        if data["mode"] == "detail"
+        else stats["directories"]
+        if progressive
+        else stats["findings"]
+    )
     coverage = min(100, reviewed / total * 100) if total else 0
+    structure = data.get("structure") or {}
+    structure_sections = []
+    if structure:
+        structure_sections = [
+            '<section class="report-section"><h3>Recognized structure</h3>',
+            f'<p>{esc(structure["basis"])}</p><div class="report-structure-grid"><div><h4>Personal data · look here first</h4><ul>',
+        ]
+        for item in structure.get("user_locations", [])[:15]:
+            structure_sections.append(
+                f"<li>{path_link(item)} <small>{esc(item['role'].replace('_', ' '))} · {size(item['bytes'])}</small></li>"
+            )
+        if not structure.get("user_locations"):
+            structure_sections.append(
+                "<li>No standard personal-data folders recognized. Other files remain eligible for review.</li>"
+            )
+        structure_sections.append("</ul></div><div><h4>Operating systems and application footprints</h4><ul>")
+        groups = [g for g in structure.get("groups", []) if g["role"] in {"system", "application"}]
+        for item in groups[:40]:
+            structure_sections.append(
+                f"<li><strong>{esc(item['label'])}</strong> · {path_link(item)} <small>{item['technical_files']:,} technical files grouped; {item['user_files']:,} potential user files retained</small></li>"
+            )
+        if not groups:
+            structure_sections.append("<li>No supported installation footprints recognized.</li>")
+        structure_sections.append(
+            "</ul></div></div><p>Grouping is based on metadata. It does not establish installation date, version, ownership, successful execution or permission to delete anything.</p></section>"
+        )
     parts = [
         f'<article class="report-document"><header class="report-doc-header"><p class="report-kicker">CONSOLIDATED INVESTIGATION REPORT</p>'
-        f'<h2>{esc(data["name"])}</h2><p class="path">{esc(data["root"])}</p><p>{"All files" if data["mode"] == "detail" else "Sampled files"} · '
+        f'<h2>{esc(data["name"])}</h2><p class="path">{esc(data["root"])}</p><p>{"Progressive investigation" if progressive else "All files" if data["mode"] == "detail" else "Sampled files"} · '
         f"Catalog snapshot · {esc(data['generated'][:19].replace('T', ' '))} UTC</p></header>",
         f'<div class="report-stat-strip"><div><strong>{stats["files"]:,}</strong><span>files inventoried</span></div>'
         f"<div><strong>{size(stats['bytes'])}</strong><span>logical data size</span></div><div><strong>{stats['directories']:,}</strong><span>folders discovered</span></div>"
-        f"<div><strong>{coverage:.0f}%</strong><span>{'files processed' if data['mode'] == 'detail' else 'relevant folders assessed'}</span></div></div>",
+        f"<div><strong>{coverage:.0f}%</strong><span>{'files processed' if data['mode'] == 'detail' else 'discovered folders assessed' if progressive else 'relevant folders assessed'}</span></div></div>",
         '<section class="report-section"><h3>What is on this drive?</h3>',
         *[f'<p class="report-narrative">{esc(p)}</p>' for p in data["summary"].split("\n\n") if p.strip()],
         f'<p class="report-provenance">{"Local AI synthesis" if data["synthesis"] == "local_ai" else "Catalog synthesis"} · {esc(data["basis"])}'
@@ -260,20 +385,22 @@ def render_report(data, origin, standalone=False):
             else ""
         )
         + "</p></section>",
-        '<div class="report-chart-grid"><section class="report-section"><h3>Content by file type</h3><p>Logical file sizes across the complete inventory.</p>',
+        *live_sections,
+        *structure_sections,
+        '<div class="report-chart-grid"><section class="report-section"><h3>Content by file type</h3><p>Logical file sizes of discovered entries. Unlisted data is not included.</p>',
         bars(stats["types"], "bytes", "category"),
         '</section><section class="report-section"><h3>Where the space is</h3><p>Top-level areas, including technical material.</p>',
         bars(data["storage"], "bytes", "rel", True),
         "</section></div>",
         f'<section class="report-section"><h3>Coverage and confidence</h3><div class="report-coverage-track"><i style="width:{coverage:.3f}%"></i></div>'
-        f"<p>{reviewed:,} / {total:,} {'files processed' if data['mode'] == 'detail' else 'relevant folders assessed'}. "
+        f"<p>{reviewed:,} / {total:,} {'files processed' if data['mode'] == 'detail' else 'discovered folders assessed' if progressive else 'relevant folders assessed'}. "
         f"{stats['inventoried_dirs']:,} / {stats['directories']:,} discovered folders inventoried.</p><p>{esc(data['caveat'])}</p>"
-        f"<p>{stats['technical_files']:,} likely technical files ({size(stats['technical_bytes'])}) are grouped as clutter; this is a heuristic.</p>",
+        f"<p>{stats['technical_files']:,} likely technical files ({size(stats['technical_bytes'])}) are marked as possible technical material; this is a filename/type hint.</p>",
     ]
     if data["mode"] == "detail":
         d = stats["detail"]
         parts.append(
-            f"<p>{d['hashed']:,} full-byte fingerprints · {d['ai_reviewed']:,} AI assessments · {d['content_read']:,} readable content samples · {d['errors']:,} read issues · {d['duplicate_groups']:,} duplicate groups.</p>"
+            f"<p>{d['hashed']:,} full-byte fingerprints · {d['ai_reviewed']:,} AI assessments · {d['content_read']:,} readable content samples · {d.get('grouped', 0):,} technical files grouped without individual reads · {d['errors']:,} read issues · {d['duplicate_groups']:,} duplicate groups.</p>"
         )
     parts.extend(
         [

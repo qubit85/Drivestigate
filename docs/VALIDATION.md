@@ -120,3 +120,43 @@ A physical drive unplug/replug cycle, failing hardware and notarized distributio
 not been acceptance tested. Simulated disconnect/replacement and catalog persistence
 are covered. The macOS bundle is ad-hoc signed; public distribution requires Apple
 Developer signing and notarization. This is a tested local release, not forensic certification.
+
+## Version 1.5 progressive investigation — 2026-10-29
+
+- New investigations use concurrent discovery and AI planning. The complete inventory is
+  no longer a prerequisite for model evaluation or a saved report. Durable task/evidence
+  tables and versioned folder observations preserve work across pauses and restarts.
+- The regression suite covers 117 tests. The final full run passed 116; the additional
+  focus API test had a test-helper tuple-unpacking error, was corrected and then passed
+  individually. Ruff, formatting, JavaScript syntax and whitespace checks passed.
+- Synthetic concurrency checks hold the model request open and verify that directory
+  discovery continues. A large root yields to a child before its own listing completes.
+  Tests cover report availability during work, refocusing without repeated reads, JSON
+  fallback, scoped child targets, image bounds, deletion cascades, queue recovery and
+  source preservation. Directory helper timeout/cancellation tests verify process exit.
+- Real local `qwen35-9b-alltag-64k:latest` / MLX acceptance used an isolated catalog and
+  eight synthetic files in fifteen folders. The first valid AI assessment arrived after
+  about 40 seconds. A continued two-minute round finished without model errors, with ten
+  assessed folders and five retained text samples (411 source bytes read cumulatively).
+  These figures are one warm/local synthetic test, not a USB-drive performance guarantee.
+- Live testing exposed model decisions targeting named child and prior-evidence folders.
+  These are now explicit scoped tool targets; unknown IDs and file IDs outside supplied
+  evidence remain rejected. Newly extracted content is prioritized for subsequent AI review.
+- The source reader uses demand-driven directory subprocesses with eight-second chunk
+  deadlines, one active source operation, bounded cursor count and cancellation. Content
+  extraction retains its existing isolated reader limits. A timed-out branch stays visible
+  and can be retried during continuation; no source repair or writes are performed.
+- Browser checks verified live reports, hidden graph controls for progressive runs, paged
+  size-tree expansion, file sizes, decision labels and cached file evidence. A synthetic
+  credential assignment was redacted in the evidence dialog. At the available 576 px
+  viewport, page width was 576 px and tree content/container widths were both 534 px.
+  `docs/screenshots/progressive-size-tree.png` contains synthetic data only.
+- The self-contained 1.5.0 bundle passed signature verification and a packaged directory
+  worker smoke test. Eight existing investigations were backed up and preserved; a prior
+  stop request on a disconnected source became stopped, paused work stayed paused, and
+  the queue's original hold state was restored. The old untouched default preset migrated
+  to five-minute progressive rounds; custom budgets and historical scan settings persist.
+- First-party local parsing supports bounded text/PDF/Office/ZIP/image samples. No OCR,
+  database inspection, exact size guarantee for unlisted branches, or exhaustive semantic
+  coverage is implied. Classification and narrative remain fallible model interpretations.
+  Physical failing-drive recovery and notarized distribution remain outside acceptance.

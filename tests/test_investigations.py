@@ -10,10 +10,13 @@ import time
 import pytest
 from test_engine import FakeOllama, wait
 
-from drivestigate.config import DEFAULTS
+from drivestigate.config import DEFAULTS as NEW_DEFAULTS
 from drivestigate.engine import Engine
 from drivestigate.knowledge import build_vault, file_note, graph_data, vault_path
 from drivestigate.store import SCHEMA, Store
+
+# Legacy-engine regression fixtures; progressive behavior has dedicated tests.
+DEFAULTS = {**NEW_DEFAULTS, "investigation_mode": "overview", "search_focus": ""}
 
 
 class DetailModel(FakeOllama):
@@ -37,7 +40,13 @@ def detail(tmp_path):
     (root / "Windows/System32/program.bin").write_bytes(b"\x00\xff\x10" * 100)
     store = Store(tmp_path / "catalog/db")
     engine = Engine(store, DetailModel)
-    settings = {**DEFAULTS, "investigation_mode": "detail", "max_llm_calls": 1, "max_folders": 1}
+    settings = {
+        **DEFAULTS,
+        "investigation_mode": "detail",
+        "detail_include_technical": True,
+        "max_llm_calls": 1,
+        "max_folders": 1,
+    }
     return store, engine, root, settings
 
 
@@ -241,7 +250,7 @@ def test_v1_migration_preserves_settings_and_inventory(tmp_path):
     assert store.settings()["search_focus"] == "Find backups"
     assert store.tree("legacy", parent="a")["items"][1]["rel"] == "a/b"
     with store.connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 def test_eta_waits_for_sample_then_reports_phase_range(detail):

@@ -157,6 +157,7 @@ async function checkConnection() {
 function syncNewSettings() {
   if (!state.settings) return;
   $("new-model").textContent = state.settings.model;
+  $("new-focus").value = state.settings.search_focus;
   $("new-depth").textContent = depthNames[state.settings.depth];
   $("focus-preview").textContent = state.settings.search_focus ? "Search focus: " + state.settings.search_focus : "No specific search focus · general investigation";
 }
@@ -202,8 +203,11 @@ async function refreshReport() {
   $("pause-scan").hidden = !running && !queued; $("stop-scan").hidden = !running && !queued;
   $("pause-scan").disabled = !queued && scan.status !== "running"; $("stop-scan").disabled = !queued && scan.status !== "running";
   $("resume-scan").hidden = running || queued;
-  $("resume-scan").textContent = scan.status === "completed" ? scan.settings.investigation_mode === "detail" ? "Rebuild Obsidian vault" : "Investigate remaining folders" : "Resume";
+  $("resume-scan").textContent = scan.status === "completed" ? scan.settings.investigation_mode === "detail" ? "Rebuild Obsidian vault" : "Continue deepening" : "Resume";
   $("resume-scan").disabled = !data.connected;
+  $("edit-focus").hidden = scan.settings.investigation_mode !== "progressive";
+  $("edit-focus").disabled = running || queued;
+  $("edit-focus").title = running || queued ? "Pause before changing the search focus" : "Reassess saved evidence with a new focus";
   $("delete-scan").disabled = scan.status === "deleting";
   $("eject-drive").hidden = !state.ejectSupported;
   $("eject-drive").disabled = !data.connected || scan.status === "deleting";
@@ -211,7 +215,7 @@ async function refreshReport() {
   $("disconnected").hidden = data.connected;
   const metrics = $("metrics"); metrics.replaceChildren();
   for (const [title, value, note] of [["Files inventoried", num(stats.files), `${num(stats.directories)} folders discovered`],
-    ["Cataloged data", formatBytes(stats.bytes), "Logical file sizes"],
+    ["Cataloged data", formatBytes(stats.bytes), "Discovered logical sizes · may be partial"],
     ["Folders assessed by AI", num(stats.analyzed_folders), `of ${num(stats.findings)} relevant folders`],
     ["Text / archive samples", num(stats.content_samples), `${num(stats.samples)} samples, including metadata`]]) {
     const metric = el("div", "metric"); metric.append(el("small", "", title), el("strong", "", value), el("p", "", note)); metrics.append(metric);
@@ -285,7 +289,7 @@ async function loadFindings() {
     container.append(item);
   }
   if (!data.items.length) container.append(el("div", "empty-state", state.scan.phase === "inventory"
-    ? "Building the inventory. Relevant folders will appear here once it is complete."
+    ? "Discovering storage. Findings will appear as evidence becomes available."
     : "No matching folders. Check filters, technical files, and skipped paths."));
   const pagination = $("pagination"); pagination.replaceChildren();
   if (data.total > 40) {
@@ -299,6 +303,7 @@ const fields = {"ollama_url": "ollama-url", model: "model-select", system_prompt
   depth: "scan-depth", max_folders: "max-folders", samples_per_folder: "samples-count", max_llm_calls: "max-calls",
   time_budget_minutes: "time-budget", max_read_mb: "read-budget", request_timeout_seconds: "request-timeout",
   hide_technical: "hide-technical", analyze_images: "analyze-images", detail_use_llm: "detail-use-llm",
+  detail_include_technical: "detail-technical",
   vault_include_excerpts: "vault-excerpts"};
 function settingsFromForm() {
   const settings = structuredClone(state.settings);
@@ -358,13 +363,16 @@ $("new-form").onsubmit = event => {
   event.preventDefault(); guarded(async () => {
     $("submit-scan").disabled = true;
     try { const data = await api("/api/scans", {root: $("scan-root").value, name: $("scan-name").value,
-      mode: document.querySelector('input[name="investigation-mode"]:checked').value}); await showReport(data.id); }
+      search_focus: $("new-focus").value, mode: document.querySelector('input[name="investigation-mode"]:checked').value}); await showReport(data.id); }
     finally { $("submit-scan").disabled = false; }
   });
 };
 for (const [id, action] of [["pause-scan", "pause"], ["stop-scan", "stop"], ["resume-scan", "resume"]]) {
   $(id).onclick = () => guarded(async () => { await api(`/api/scans/${state.selected}/${action}`, {}); await refreshReport(); await loadScans(); });
 }
+$("edit-focus").onclick = () => { $("investigation-focus").value = state.scan.settings.search_focus; $("investigation-prompt").value = state.scan.settings.system_prompt; $("focus-dialog").showModal(); };
+$("cancel-focus").onclick = () => $("focus-dialog").close();
+$("focus-form").onsubmit = event => { event.preventDefault(); guarded(async () => { await api(`/api/scans/${state.selected}/focus`, {search_focus: $("investigation-focus").value, system_prompt: $("investigation-prompt").value}); $("focus-dialog").close(); toast("Focus saved. Continue deepening to reassess existing evidence and follow new leads."); await refreshReport(); }); };
 $("delete-scan").onclick = () => { if (state.scan) confirmDeletion(state.scan); };
 $("eject-drive").onclick = () => {
   if (!state.scan) return;

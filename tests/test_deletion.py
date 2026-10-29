@@ -6,10 +6,13 @@ import time
 import pytest
 from test_engine import FakeOllama, wait
 
-from drivestigate.config import DEFAULTS
+from drivestigate.config import DEFAULTS as NEW_DEFAULTS
 from drivestigate.demo import create_demo
 from drivestigate.engine import Engine
 from drivestigate.store import Store
+
+# Legacy-engine regression fixtures; progressive behavior has dedicated tests.
+DEFAULTS = {**NEW_DEFAULTS, "investigation_mode": "overview", "search_focus": ""}
 
 
 def assert_absent(store, sid):

@@ -39,19 +39,30 @@ def fingerprint(engine, scan, file):
 
 def investigate_files(engine, scan):
     store, sid, settings = engine.store, scan["id"], scan["settings"]
-    client = engine.client_factory(settings) if settings["detail_use_llm"] else None
-    if client:
-        info = client.test()
-        if settings["analyze_images"] and "vision" not in info.get("capabilities", []):
-            raise ValueError("The selected model does not support image analysis.")
     with store.connect() as db:
         db.execute("INSERT OR IGNORE INTO file_details(file_id) SELECT id FROM files WHERE scan_id=?", (sid,))
+        if not settings.get("detail_include_technical", False):
+            db.execute(
+                "UPDATE file_details SET state='metadata',content_status='grouped',summary=?,reason=?,priority=3 "
+                "WHERE state NOT IN ('reviewed','metadata','error') AND file_id IN "
+                "(SELECT id FROM files WHERE scan_id=? AND technical=1)",
+                (
+                    "Grouped technical material; content was not read individually.",
+                    "Recognized from directory layout or file metadata. Enable individual technical-file inspection for content reads and full-byte fingerprints.",
+                    sid,
+                ),
+            )
         total = db.execute("SELECT COUNT(*) FROM files WHERE scan_id=?", (sid,)).fetchone()[0]
         completed = db.execute(
             "SELECT COUNT(*) FROM files f JOIN file_details x ON x.file_id=f.id "
             "WHERE f.scan_id=? AND x.state IN ('reviewed','metadata','error')",
             (sid,),
         ).fetchone()[0]
+    client = engine.client_factory(settings) if settings["detail_use_llm"] and completed < total else None
+    if client:
+        info = client.test()
+        if settings["analyze_images"] and "vision" not in info.get("capabilities", []):
+            raise ValueError("The selected model does not support image analysis.")
     engine.live.setdefault(sid, {}).update(phase_started=time.monotonic(), durations=[], baseline=completed)
     store.update(sid, phase="detail")
     engine.progress_update(
@@ -71,7 +82,7 @@ def investigate_files(engine, scan):
             row = db.execute(
                 "SELECT f.*,x.state,x.sha256 FROM files f JOIN file_details x ON x.file_id=f.id "
                 "WHERE f.scan_id=? AND x.state NOT IN ('reviewed','metadata','error') "
-                "ORDER BY f.id LIMIT 1",
+                "ORDER BY f.technical,f.score DESC,f.id LIMIT 1",
                 (sid,),
             ).fetchone()
         if not row:
@@ -189,5 +200,5 @@ def investigate_files(engine, scan):
         vault_path=str(vault),
         phase="complete",
         status="completed",
-        message="Every inventoried file was processed. Obsidian vault ready; review content coverage and errors.",
+        message="Every inventoried file is accounted for. Obsidian vault ready; review fingerprints, grouped technical files and content coverage.",
     )

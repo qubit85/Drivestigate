@@ -67,6 +67,24 @@ CREATE TABLE IF NOT EXISTS scan_reports (
  payload TEXT NOT NULL DEFAULT '{}', state TEXT NOT NULL DEFAULT 'pending',
  generated TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS investigation_tasks (
+ id INTEGER PRIMARY KEY, scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL, target INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+ priority INTEGER NOT NULL DEFAULT 50, attempts INTEGER NOT NULL DEFAULT 0,
+ UNIQUE(scan_id,kind,target)
+);
+CREATE INDEX IF NOT EXISTS investigation_pending ON investigation_tasks(scan_id,state,priority);
+CREATE TABLE IF NOT EXISTS investigation_evidence (
+ file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+ scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE, payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS investigation_memory (
+ scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE, payload TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS scan_structure (
+ scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,
+ payload TEXT NOT NULL DEFAULT '{}'
+);
 """
 
 
@@ -77,7 +95,7 @@ class Store:
         self.lock = threading.RLock()
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 4:
+            if version > 6:
                 raise RuntimeError("This catalog was created by a newer version of Drivestigate.")
             db.executescript(SCHEMA)
             scan_columns = {r[1] for r in db.execute("PRAGMA table_info(scans)")}
@@ -99,15 +117,71 @@ class Store:
                     "UPDATE directories SET parent_rel=? WHERE id=?",
                     [(str(PurePosixPath(r[1]).parent) if r[1] != "." else "", r[0]) for r in rows],
                 )
-            needs_rollup = "tree_files" not in dir_columns
+            needs_rollup = version < 6 or "tree_files" not in dir_columns
             for name in ("tree_files", "tree_bytes"):
                 if name not in dir_columns:
                     db.execute(f"ALTER TABLE directories ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+            for name in ("role", "role_reason", "group_rel"):
+                if name not in dir_columns:
+                    db.execute(f"ALTER TABLE directories ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            for name, definition in {
+                "revision": "INTEGER NOT NULL DEFAULT 0",
+                "assessed_revision": "INTEGER NOT NULL DEFAULT -1",
+                "planned_revision": "INTEGER NOT NULL DEFAULT -1",
+                "decision": "TEXT NOT NULL DEFAULT ''",
+                "uncertainty": "TEXT NOT NULL DEFAULT ''",
+                "listing_error": "INTEGER NOT NULL DEFAULT 0",
+                "tree_complete": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if name not in dir_columns:
+                    db.execute(f"ALTER TABLE directories ADD COLUMN {name} {definition}")
+            file_columns = {r[1] for r in db.execute("PRAGMA table_info(files)")}
+            for name in ("role", "group_rel"):
+                if name not in file_columns:
+                    db.execute(f"ALTER TABLE files ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             db.execute("CREATE INDEX IF NOT EXISTS dirs_parent ON directories(scan_id,parent_rel)")
-            db.execute("PRAGMA user_version=4")
+            if version < 6:
+                config = db.execute("SELECT value FROM config WHERE id=1").fetchone()
+                if config:
+                    settings = json.loads(config[0])
+                    settings["investigation_mode"] = "progressive"
+                    if (
+                        settings.get("depth"),
+                        settings.get("max_folders"),
+                        settings.get("samples_per_folder"),
+                        settings.get("max_llm_calls"),
+                        settings.get("time_budget_minutes"),
+                    ) == ("balanced", 40, 6, 60, 60):
+                        settings.update(
+                            {
+                                k: DEFAULTS[k]
+                                for k in (
+                                    "depth",
+                                    "max_folders",
+                                    "samples_per_folder",
+                                    "max_llm_calls",
+                                    "time_budget_minutes",
+                                )
+                            }
+                        )
+                    if not settings.get("search_focus"):
+                        settings["search_focus"] = DEFAULTS["search_focus"]
+                    db.execute("UPDATE config SET value=? WHERE id=1", (json.dumps(settings),))
+                for existing in db.execute("SELECT id,settings FROM scans").fetchall():
+                    settings = json.loads(existing["settings"])
+                    if (
+                        settings.get("investigation_mode") == "detail"
+                        and "detail_include_technical" not in settings
+                    ):
+                        settings["detail_include_technical"] = True
+                        db.execute(
+                            "UPDATE scans SET settings=? WHERE id=?", (json.dumps(settings), existing["id"])
+                        )
+            db.execute("PRAGMA user_version=6")
             # No worker survives a process restart. Finish confirmed deletions that
             # were waiting for a read or inference operation when the app closed.
             db.execute("DELETE FROM scans WHERE delete_requested=1")
+            db.execute("UPDATE investigation_tasks SET state='pending' WHERE state='running'")
             db.execute("UPDATE scan_reports SET state='pending' WHERE state='building'")
             db.execute(
                 "UPDATE scans SET status='paused',message='Resume after restarting.' "
@@ -244,6 +318,11 @@ class Store:
                 )
             ]
 
+    def structure(self, scan_id):
+        with self.connect() as db:
+            row = db.execute("SELECT payload FROM scan_structure WHERE scan_id=?", (scan_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
     def stats(self, scan_id):
         with self.connect() as db:
             row = dict(
@@ -281,6 +360,12 @@ class Store:
                 sum(s.get("status") == "excerpt" for s in json.loads(r[0]))
                 for r in db.execute("SELECT samples FROM findings WHERE scan_id=?", (scan_id,))
             )
+            if self.get_scan(scan_id)["settings"].get("investigation_mode") == "progressive":
+                counts = db.execute(
+                    "SELECT COUNT(*),COALESCE(SUM(json_extract(payload,'$.status')='excerpt'),0) FROM investigation_evidence WHERE scan_id=?",
+                    (scan_id,),
+                ).fetchone()
+                row["samples"], row["content_samples"] = counts
             row["events"] = {
                 r[0]: r[1]
                 for r in db.execute(
@@ -301,6 +386,7 @@ class Store:
                     "COALESCE(SUM(x.state IN ('reviewed','metadata','error')),0) processed,"
                     "COALESCE(SUM(x.state='reviewed'),0) ai_reviewed,"
                     "COALESCE(SUM(x.content_status IN ('excerpt','image')),0) content_read,"
+                    "COALESCE(SUM(x.content_status='grouped'),0) grouped,"
                     "COALESCE(SUM(x.state='error' OR x.error!=''),0) errors FROM file_details x JOIN files f ON f.id=x.file_id "
                     "WHERE f.scan_id=?",
                     (scan_id,),
@@ -332,20 +418,23 @@ class Store:
             rows = [
                 dict(r)
                 for r in db.execute(
-                    "SELECT d.id,d.rel,d.parent_rel,COUNT(f.id) files,COALESCE(SUM(f.size),0) bytes "
+                    "SELECT d.id,d.rel,d.parent_rel,d.done,d.listing_error,COUNT(f.id) files,COALESCE(SUM(f.size),0) bytes "
                     "FROM directories d LEFT JOIN files f ON f.dir_id=d.id WHERE d.scan_id=? GROUP BY d.id",
                     (scan_id,),
                 )
             ]
+            for row in rows:
+                row["complete"] = bool(row["done"] and not row["listing_error"])
             mapping = {r["rel"]: r for r in rows}
             for row in sorted(rows, key=lambda r: r["rel"].count("/") + (r["rel"] != "."), reverse=True):
                 parent = mapping.get(row["parent_rel"])
                 if parent:
                     parent["files"] += row["files"]
                     parent["bytes"] += row["bytes"]
+                    parent["complete"] = parent["complete"] and row["complete"]
             db.executemany(
-                "UPDATE directories SET tree_files=?,tree_bytes=? WHERE id=?",
-                [(r["files"], r["bytes"], r["id"]) for r in rows],
+                "UPDATE directories SET tree_files=?,tree_bytes=?,tree_complete=? WHERE id=?",
+                [(r["files"], r["bytes"], int(r["complete"]), r["id"]) for r in rows],
             )
 
     def tree(self, scan_id, parent=".", offset=0, limit=150):
@@ -362,6 +451,7 @@ class Store:
                 "SELECT d.*,a.id finding_id,a.analyzed,COUNT(f.id) own_files,COALESCE(SUM(f.size),0) own_bytes,"
                 "COALESCE(SUM(f.technical),0) technical_files,"
                 "COALESCE(SUM(x.state IN ('reviewed','metadata','error')),0) processed_files,"
+                "COALESCE(SUM(x.content_status='grouped'),0) grouped_files,"
                 "COALESCE(SUM(x.state='error' OR x.error!=''),0) + "
                 "(SELECT COUNT(*) FROM events e WHERE e.scan_id=d.scan_id AND e.rel=d.rel AND e.kind='unreadable') errors,"
                 "(SELECT COUNT(*) FROM directories c WHERE c.scan_id=d.scan_id AND c.parent_rel=d.rel) children "
@@ -394,6 +484,21 @@ class Store:
             raise ValueError("File not found in this investigation.")
         result = dict(row)
         result["topics"] = json.loads(result["topics"] or "[]")
+        if not result.get("state"):
+            with self.connect() as db:
+                cached = db.execute(
+                    "SELECT payload FROM investigation_evidence WHERE scan_id=? AND file_id=?",
+                    (scan_id, file_id),
+                ).fetchone()
+            if cached:
+                evidence = json.loads(cached[0])
+                result.update(
+                    state="sampled",
+                    content_status=evidence["status"],
+                    excerpt=evidence.get("text", ""),
+                    summary="A bounded sample is available below.",
+                    reason="This is saved extraction evidence, not a whole-file AI assessment.",
+                )
         return result
 
     def findings(self, scan_id, offset=0, limit=100, query="", priority=None):

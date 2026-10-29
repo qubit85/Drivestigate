@@ -2,18 +2,19 @@
 
 **Investigate your drives. Rediscover what matters.**
 
-A local macOS application for exploring old hard drives and USB sticks with Ollama.
-It builds a resumable metadata catalog, queues investigations, groups technical clutter,
-and produces evidence-based reports with Finder links. A live folder map shows progress.
-All-file detail mode adds full-byte fingerprints, per-file assessments, a visual knowledge
-graph and an exportable Obsidian vault.
+A local macOS application for exploring arbitrary drives and folders with Ollama.
+Discovery and AI analysis run concurrently. The investigator builds an early overview,
+requests selective content samples, revises its understanding and updates a single live
+report. Folder names, device layouts and operating systems are clues, not assumptions
+about what a drive contains.
 
 ![Drivestigate overview with synthetic demo data](docs/screenshots/overview.png)
 
 ## Start on macOS
 
-Requirements: Python 3.11 or later, Ollama running locally, and an installed local
-text/completion model. A vision-capable model is needed only for optional image sampling.
+Requirements: Python 3.11 or later, a running local Ollama service and an installed
+completion model capable of following structured instructions. A vision model is needed
+only for optional image sampling.
 
 ```sh
 git clone https://github.com/qubit85/Drivestigate.git
@@ -22,270 +23,173 @@ bash scripts/setup.sh
 ./Start\ Drivestigate.command
 ```
 
-You can also double-click **Start Drivestigate.command** in Finder. The first launch
-installs PDF/image support into a project-local virtual environment; this installation
-requires an internet connection. Runtime processing does not require internet access.
-Open [127.0.0.1:8741](http://127.0.0.1:8741) if the browser does not open automatically.
-Keep the terminal running; Ctrl+C stops the application. Your progress is preserved.
+You can double-click **Start Drivestigate.command** in Finder. Initial dependency
+installation requires internet access; runtime processing is local. Open
+[127.0.0.1:8741](http://127.0.0.1:8741) if the browser does not open automatically.
+The default model is `qwen35-9b-alltag-64k:latest`; select your installed model in Settings.
+The MLX runner's missing native structured-output support is handled with a validated
+JSON fallback. No model is downloaded automatically.
 
-The default model name is `qwen35-9b-alltag-64k:latest`; select your own installed model
-in **Settings**. The model name is a configuration default, not a required download.
-The Ollama MLX runner is supported even when native structured output is unavailable:
-Drivestigate validates the model's JSON and all referenced file IDs itself.
-
-### Self-contained macOS application
-
-The build script creates `dist/Drivestigate.app` with Python, PDF/image readers, and the
-web interface bundled. It only needs your local Ollama service at runtime:
+For the self-contained Apple Silicon/macOS application:
 
 ```sh
 .venv/bin/python -m pip install -c constraints.txt pyinstaller
 bash scripts/build_macos.sh
 ```
 
-Quit the desktop app before rebuilding; the build script refuses to replace a running bundle.
-The desktop bundle is built for the architecture of the build Mac. Local builds are
-ad-hoc signed; public distribution still requires your Apple Developer identity and
-notarization. Closing the browser does not stop the background desktop app; use Quit
-from its Dock icon. The source launcher remains useful for development and terminal logs.
+The bundle is `dist/Drivestigate.app`. Quit it before rebuilding; the build script refuses
+to replace a running bundle. Builds are architecture-specific and ad-hoc signed. Public
+Mac distribution still requires Developer ID signing and notarization. Closing a browser
+tab does not stop the app; use Quit from its Dock icon.
 
-## Workflow
+## Progressive investigations
 
-1. Open **Settings**. Select a local model and test the connection. Edit the system
-   prompt, add search priorities, save reusable profiles, and choose sampling budgets.
-2. Start **New investigation**. Choose a mounted drive or folder, select **Sampled files**
-   or **All files + Obsidian vault**, and add it to the queue. The synthetic demo is optional.
-3. Inventory enumerates every accessible directory entry and collects metadata. Excluded
-   paths, symlinks, other mounted filesystems, permission errors and unreadable filenames
-   are logged. Files are not opened for their contents during inventory.
-4. Relevant folders receive visible metadata findings before AI analysis starts. The
-   investigator prioritizes filenames, types and your search focus, then samples different
-   extensions, ages, sizes and a deterministic random slice. Qwen can request a second round.
-5. Read the report. Folder names open Finder; sample filenames reveal the file in Finder.
-   **Copy path** also works while a drive is disconnected. **Investigate further**
-   requests additional samples from one folder. **Resume** investigates remaining folders.
-6. Export HTML, CSV or JSON. HTML links return to that finding in the running local app,
-   where Finder actions are available. Standalone exported HTML does not directly launch Finder.
+1. Select a model in **Settings** and test its connection. Set your system prompt,
+   search focus and time/read/AI-call budgets. The new default round lasts up to five
+   minutes, including discovery and analysis. Existing saved custom budgets are retained.
+2. Choose **New investigation**, select a mounted drive or folder, and edit its search
+   focus directly. Add it to the persistent investigation queue.
+3. Discovery lists folders in bounded chunks. A separate AI worker starts as soon as
+   evidence is available. It can explore, sample, deepen, defer or summarize a branch,
+   and search names and retained excerpts in the already discovered catalog.
+4. Read the live report while work continues. It includes an evolving content narrative,
+   evidence links, open questions, recent understanding updates, size/type/timeline
+   charts and coverage gaps. Numbers come from the catalog, not the model.
+5. **Pause**, **Stop** or let the round reach its budget. **Continue deepening** grants
+   another bounded round, reusing cached evidence and unfinished work. Completed means
+   the round finished, not that every file on the source was discovered or understood.
+6. While paused or between rounds, **Change search focus** edits the investigation's
+   focus and system prompt. Prior judgments are reassessed against retained evidence;
+   completed content reads need not be repeated.
 
-The persistent queue runs one investigation at a time. On **Overview**, drag queued jobs or
-use the up/down buttons to reorder them. **Hold queue** prevents the next job from starting
-while allowing the active job to finish. Remove a queued job to preserve it as paused.
+The source has one read lane. AI inference overlaps source access; parser subprocesses
+isolate bounded extraction. Work is persisted in SQLite and resumes after restart. The
+reader has a bounded lead over inference, and directory chunks yield so a giant folder
+cannot monopolize discovery. Scheduling reserves turns for unfamiliar and deferred
+branches. Directory decisions and summaries remain hypotheses backed by specific evidence.
+No full-byte hashing or knowledge-graph generation runs on the progressive path.
 
-**Delete** is available in the overview and investigation report; the sidebar also has
-a delete button beside each investigation. Confirming permanently removes that
-investigation's local inventory, findings, saved report and in-app graph. Source files,
-downloaded reports and exported Obsidian vault folders are kept. A running investigation
-offers **Stop and delete**: it waits for the current read or AI request to finish before
-removing the catalog, then continues the queue. A confirmed pending deletion also
-finishes after an application restart. Use queue **Remove** or **Pause** to keep a run
-for later instead of deleting it.
+Model replies may request only known, scoped IDs and a fixed set of read-only actions.
+Invalid plans receive a bounded correction attempt. If the model remains unavailable,
+work stops with the catalog/report preserved; repair the local connection and continue.
+Directory listing runs in demand-driven helper processes with an eight-second batch timeout and cancellation; a failed branch remains visible and can be retried on continuation. A source read can still take up to its worker timeout to stop. In-flight AI
+requests are capped by the remaining round budget and at most 60 seconds. A timeout
+bounds the client wait; an external model server may continue processing a cancelled request.
 
-The sidebar uses distinct status badges for running, paused, queued, waiting,
-completed and transitional states. Its **Pause**, **Resume / Queue** and **Stop**
-buttons act directly on that investigation. Progress-only updates retain the current
-sidebar controls so keyboard focus is not replaced during a scan.
+The app cannot know the total size or duration of unexplored branches. It displays time
+left in the **current round**, discovered/listed/assessed counts, active reader and AI work,
+and queued/deferred tasks. These are not estimates of exhaustive drive coverage.
 
-On macOS, **Eject drive** in the investigation report safely ejects the external disk
-containing the source, including its other volumes. Pause the active investigation
-and wait for **Paused** first. The scheduler cannot start another reader during the
-eject request. The app verifies the original source identity and macOS device flags,
-rejects internal or non-ejectable disks, and never forces an unmount. Other apps can
-still block ejection; close their files and try again. Saved reports remain available
-after ejection, and queued investigations wait for their source to reconnect.
-Disconnected jobs wait without blocking connected drives and are retried automatically.
-After restarting, interrupted active jobs are paused; queued jobs retain their order.
+## Folder and file views
 
-The report shows phase progress, completed/total units, throughput and elapsed time.
-A rough ETA range appears after two completed units in the current processing phase.
-It uses recent unit durations and excludes later phases. Inventory cannot estimate a
-total until discovery finishes; large files and variable model latency can change the ETA.
-The live folder tree distinguishes discovery, metadata inventory, sampling, completed
-processing and read issues. The size map shows up to 24 largest immediate entries;
-expand folders and drill down to inspect their files. Folder status describes own files.
+- **Folder map** shows discovered logical sizes and review states. Unmeasured branches
+  use placeholder areas; `≥` means a partial lower bound. Small entries remain accessible
+  in the list below the map.
+- **Size tree** is an expandable, paged tree of folders and files, sortable by size or name.
+  Measured folder totals include descendants. Partial totals use `≥`; unmeasured totals
+  show **Unknown**. Exact totals require enumerating the corresponding subtree.
+- Hover/focus a folder or select **ⓘ** for its plain-text description, evidence basis,
+  uncertainty and coverage. Descriptions use saved evidence and also work offline.
+- Evidence links open folders or reveal files in Finder. Copy paths while disconnected.
+  Individual finding cards remain available below the comprehensive report.
 
-Pause/stop take effect at the next checkpoint; an in-flight
-model request can take up to the configured request timeout. Interrupted scans can be resumed. Completed scans with unreviewed folders can also be continued.
-Prompts, filters, model selection and budgets are snapshotted per scan. To use different
-settings on existing material, create a new scan. Budgets renew on each explicit resume
-or deepen action. Metadata inventory is not limited by the AI time budget.
+**Open / save full report** provides a portable HTML document suitable for saving or
+printing. Its links return to the running local app. HTML/CSV/JSON evidence exports remain
+available. Regenerating a progressive report uses saved knowledge without source reads or
+an extra model call. Legacy reports retain their original synthesis behavior.
 
-## One comprehensive report per investigation
+## Queue, retention and drives
 
-The report begins with a consolidated document: a content narrative, inventory totals,
-file-type and top-level storage charts, review coverage, a last-modified-year timeline,
-up to ten promising evidence paths and recommended next steps. Low-priority findings
-stay outside the short reading list. All inventory bytes remain accounted for, including
-technical material and folders grouped under “Other”. Individual finding cards are
-available in the expandable **Individual findings & evidence** section.
+The persistent queue runs one investigation at a time. Drag queued jobs or use arrows
+to reorder them. **Hold queue** prevents the next job from starting. Disconnected jobs
+wait without blocking connected sources. Interrupted active jobs become paused on restart.
+The sidebar shows status and direct Pause/Resume/Stop controls.
 
-A report is saved automatically after each completed investigation run, including runs
-that finish at their sampling budget. It states the remaining coverage gaps. A single
-additional local Qwen synthesis request (bounded to 60 seconds) summarizes saved
-assessments and aggregate metadata; source files are not read again. Overview budgets
-apply to investigation requests; report synthesis has this separate bounded request.
-If synthesis fails, a readable catalog summary and all charts remain available.
-Structural detail mode with AI disabled does not call the model for its report.
+**Delete** removes only the selected investigation's local catalog, tasks, findings and
+saved report. Active deletion waits for its workers to stop. Source files, downloaded
+reports and previously exported Obsidian vaults are kept. Confirmed deletion intent
+survives restart.
 
-**Generate report / Regenerate report** also works for older or paused investigations,
-including disconnected sources. This task uses the persistent queue, preserves the
-original investigation phase/status and does not resume file scanning. Opening an older
-completed investigation generates its missing report automatically. Resuming a scan
-marks its previous report as stale until a fresh version is ready.
+On macOS, **Eject drive** verifies source identity and disk flags and safely ejects the
+external disk containing the source, including other volumes. Pause active work first.
+Internal or non-ejectable disks are rejected; ejection is never forced. Other applications
+can still prevent macOS from ejecting a busy disk.
 
-**Open / save full report** opens a portable HTML document with its styles included.
-Save it from the browser or use Print / Save as PDF. Evidence links return to the local
-app; paths in the in-app report open Finder when the source is connected. Exports contain
-private paths and model assessments and should be handled like the source material.
+## Compatibility with older investigations
 
-Scan modes are now labeled **Sampled files** and **All files + Obsidian vault** in
-**New investigation**. Each existing investigation also displays its current mode and
-provides a button to prepare a new investigation in the other mode. Changing modes
-starts a separate catalog snapshot rather than changing how saved findings were obtained.
+Saved sampled and detail investigations remain readable and resumable. They keep their
+original processing model; start a new progressive investigation to use the new scheduler.
+Legacy detail runs and exported Obsidian vaults are preserved. Their graph is visible only
+for detail investigations. New investigations use the progressive workflow.
 
-Every folder now has a plain-text description. Hover or keyboard-focus its name in the
-folder tree, size map or entry list to see a tooltip; Escape dismisses it. Select **ⓘ**
-for the full text, **Copy summary** and Finder access. Opening a folder also shows its
-summary above the size map. The selected-folder preview is expandable and links to the
-full summary, so long descriptions do not overwhelm the map.
-
-Descriptions reuse saved sampled or per-file assessments when available. Unreviewed
-folders receive a clearly labeled filename/metadata summary with file types and example
-paths. Parent folders can show selected reviewed descendants without claiming the whole
-subtree was reviewed. Incomplete inventories, skipped paths and read issues remain
-explicit. Reading a folder summary requires no new source-file read or model request,
-and works with a disconnected source. Summaries are fetched on demand and cached until
-the investigation changes.
-
-The folder map scales labels to available tile space. Entries too small to draw remain
-accessible in the compact list below it, including on narrow screens.
-
-## All-file detail and the knowledge graph
-
-![Knowledge graph with synthetic file evidence](docs/screenshots/knowledge-graph.png)
-
-**All files + Obsidian vault** attempts every inventoried regular file, including
-technical files. Each accessible unchanged file is read completely for a SHA-256
-fingerprint, then receives a bounded supported content extraction and, by default, one
-local-model assessment with suggested topics. Overview sampling, time and read budgets
-do not truncate detail mode. Pause or stop it when needed. Failed AI requests pause for
-retry after three attempts; completed file work is retained. Files that change or cannot
-be read remain visible with errors. Exclusions and skipped filesystem entries still apply.
-
-A complete fingerprint means every byte was read for hashing. **It does not mean the AI
-understood the whole file.** The supported extraction limits below still apply. Unsupported
-binaries, large PDFs, encrypted documents and other unavailable content receive metadata
-assessments. Separate counters show processed files, full fingerprints, AI assessments,
-readable content samples and errors. Disable per-file AI in Settings for a structural
-all-file pass with fingerprints and an Obsidian vault, without semantic topic links.
-
-Select **Knowledge graph** in a report to explore files, folders, extension-derived types,
-AI-suggested topics and exact duplicate groups. Solid folder/hash links are observed;
-dashed topic links are model suggestions. Click nodes for connections and evidence, drag
-to rearrange, pan and zoom, or use the keyboard and accessible node list. Search narrows
-the graph; the display is capped at 100–400 files for responsiveness. The vault includes
-all inventoried files, independently of that display cap. A graph is useful for connecting
-related material across folders; the folder map remains the clearest completeness view.
-
-After detail mode completes, **Download Obsidian vault** exports the linked notes as ZIP.
-**Open vault folder** opens the generated folder in Finder; open that folder as a vault
-in Obsidian and select Graph view. It contains one note per file and folder, topic/type
-notes, duplicate groups and coverage/issue notes using standard wikilinks. File and folder
-notes have human-readable names with stable IDs so their Obsidian graph labels remain useful. File notes link
-back to their evidence in the running Drivestigate instance. See Obsidian's
-[internal links](https://help.obsidian.md/links) and [Graph view](https://help.obsidian.md/plugins/graph).
-
-Vaults are stored separately under the catalog's `vaults/` directory. Each build creates
-a new folder so user edits to older exports survive. Original files are never copied.
-Source excerpts are omitted by default; opt in under Settings if wanted. File names,
-paths, summaries, topics and hashes are still potentially private. Nothing is imported
-into an existing personal Obsidian vault automatically. HTML, CSV and JSON detail exports
-also include the per-file coverage ledger. **Rebuild Obsidian vault** regenerates notes
-from the saved snapshot; create a new investigation to inspect changed source material.
+Legacy detail can group recognized technical files without hashing or reading them when
+`detail_include_technical` is false. Existing strict-detail settings retain their original
+behavior. Full hashes never imply complete semantic understanding.
 
 ## What is actually inspected?
 
-| Type | Sampling behavior |
+| Type | Bounded sampling behavior |
 | --- | --- |
-| Text, code, CSV, JSON, email | Up to 16 KB read; at most 6,000 characters retained per sample |
-| PDF | Files up to 2 MiB, first three pages; requires pypdf; scanned/encrypted PDFs remain metadata |
-| DOCX, XLSX, PPTX | Files up to 2 MiB; selected XML text only, no macros or external links executed |
-| ZIP | Files up to 2 MiB; up to 80 entry names, never extract archive members to disk |
-| Images | Files up to 2 MiB; dimensions by default, optional 512 px thumbnail sent to local vision model |
-| Video, audio, legacy Office, RAR/7z, disk images, databases | Metadata only; reported as uninspected content |
+| Text, code, CSV, JSON, email | Up to 16 KB read; at most 6,000 characters retained |
+| PDF | Files up to 2 MiB, first three pages; scanned/encrypted documents remain metadata |
+| DOCX, XLSX, PPTX | Files up to 2 MiB; selected XML text; no macros or external links executed |
+| ZIP | Files up to 2 MiB; up to 80 entry names; no extraction onto the source |
+| Images | Files up to 2 MiB; dimensions or optional bounded thumbnails for a vision model |
+| Video/audio, legacy Office, RAR/7z, disk images, databases | Metadata only; content remains uninspected |
 
-Only excerpts are sent to the model, with additional per-request truncation to keep the
-context manageable. Technical classification uses conservative path/extension rules;
-potential user documents inside application folders remain visible. It is still a heuristic.
-No OCR, recursive archive extraction, malware scan, forensic recovery, duplicate removal, or
-proof that all important files have been found is implied. Empty folders have inventory
-entries but no content finding. A grouped technical file is **not** a deletion recommendation.
+Model context uses bounded representative metadata and excerpts. Familiar path/extension
+rules provide priority hints only in progressive investigations; personal files in unusual
+or technical-looking locations remain eligible. Source changes, skipped entries and read
+issues are explicit. There is no OCR, forensic recovery, exhaustive discovery guarantee,
+automatic duplicate removal or deletion recommendation.
+
+Common password assignments, private-key blocks and token patterns are redacted before
+progressive excerpts are cached or sent to the model. This is best-effort pattern filtering,
+not a guarantee that arbitrary sensitive text is detected. Reports should describe secret
+locations and types, never reproduce their values.
 
 ## Local data and safety
 
-- The application listens only on `127.0.0.1`. Sessions use an HttpOnly SameSite cookie,
-  a per-run CSRF token, Host/Origin checks, CSP and no third-party browser assets.
-- Only a loopback Ollama URL is accepted. Cloud model entries are filtered and remote
-  model metadata is rejected. No source files are uploaded by Drivestigate. For defense
-  in depth, Ollama supports `OLLAMA_NO_CLOUD=1` on the **Ollama service**, followed by a
-  service restart; see the [official Ollama FAQ](https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features).
-- Source files are opened read-only. Symlinks and special files are not followed; Finder
-  accepts catalog IDs rather than arbitrary user-supplied paths. Extraction runs in a
-  separate process with time and memory/CPU limits where supported. This is a resource
-  boundary, not an OS sandbox for parser vulnerabilities. Keep parser dependencies updated.
-- No source scripts, executables, macros or file-embedded commands are executed. Model
-  output is validated and rendered as text. The model cannot run tools or mutate files.
-- The OS can update access times or its own volume metadata when reading a mounted drive.
-  For a forensic write guarantee, use a read-only mount or hardware write blocker.
-- Catalogs contain filenames, model assessments, prompts and short sample excerpts. They
-  are private local data, not encrypted at rest by this application. Protect them as you
-  would protect the scanned files. Exports can contain the same sensitive information.
-- The original volume is recognized using root-directory identity and, on macOS, its volume
-  UUID if the device number changes. Keep its mount path stable. To scan a relocated or
-  modified source afresh, create a new scan. Catalogs are snapshots, not live synchronization.
+- The server binds to `127.0.0.1`. It uses HttpOnly SameSite session cookies, per-run CSRF
+  protection, Host/Origin checks, CSP and no third-party browser assets.
+- Only loopback model endpoints and locally stored models are accepted. Redirects and
+  inherited HTTP proxies are disabled. No external service receives source content.
+- The application opens sources read-only, rejects symlinks/special files and validates
+  source identity. Model text cannot execute shell commands or modify source files.
+- Extraction uses subprocess time and CPU/memory limits where supported. This is resource
+  isolation, not an OS security sandbox. Keep parser dependencies updated.
+- The OS can update access times or volume metadata when reading a mounted drive. Use a
+  read-only mount or hardware write blocker if forensic write protection is required.
+- Catalogs contain private paths, prompts, excerpts, optional image thumbnails and model
+  assessments. They are not encrypted at rest by the app. Protect catalogs and exports.
+- A catalog is a snapshot, not live synchronization. Keep the original mount path stable;
+  create a new investigation for a relocated or changed source.
 
-Default catalog location on macOS: `~/Library/Application Support/Drivestigate/`.
-Use `--data-dir /path/outside/the/source` or `DRIVESTIGATE_DATA_DIR` to change it.
-The source cannot contain the catalog directory. Back up the catalog only while the
-application is stopped (SQLite uses WAL). Nothing under `.data/` is committed to Git.
-Synthetic demo folders are created in the system temporary directory and can be removed
-when no longer needed; saved reports remain in the catalog.
+Default data location: `~/Library/Application Support/Drivestigate/`. Override it with
+`--data-dir` or `DRIVESTIGATE_DATA_DIR`. The catalog must be outside the source. Back up a
+stopped catalog, or use SQLite's backup API to capture a live WAL database consistently.
+No investigation data should be committed to Git.
 
 ```sh
 .venv/bin/python -m drivestigate.server --no-browser --port 8741 --data-dir .data
 ```
 
-## Troubleshooting
+## Development and validation
 
-- **Ollama unavailable:** start Ollama, verify its address, then refresh the model list.
-- **Model missing:** select an installed local completion model; Drivestigate does not pull models.
-- **Model errors:** check the report's events. After three consecutive failed calls, the scan
-  pauses. Decrease sampling/prompt size or use a more capable model in a new scan.
-- **Permission denied:** macOS may require Files and Folders access for the terminal/Python
-  host. Grant only the access needed for your chosen drive; the app does not change permissions.
-- **Disconnected:** reconnect the same volume at the same mount path, then resume.
-- **Port already used:** stop the existing instance or choose another `--port`.
-- **No content samples:** inspect each sample's status; large/unsupported/encrypted files
-  may intentionally receive only a metadata assessment.
-
-## Development
-
-The core server, inventory and catalog use Python's standard library. The browser UI is
-plain JavaScript/CSS; no frontend build or external CDN is needed. Optional readers are
-installed by the normal setup script. macOS Finder integration is the supported desktop
-target; core scanning also runs on Linux with manual paths and copied links.
+The server/catalog use Python's standard library, with optional PDF/image readers. The UI
+is plain JavaScript/CSS. Finder integration targets macOS; the core also runs on Linux.
 
 ```sh
-.venv/bin/python -m pip install -c constraints.txt '.[documents,dev]'
 .venv/bin/ruff check .
 .venv/bin/ruff format --check .
 .venv/bin/python -m pytest -q
 node --check drivestigate/static/app.js
 node --check drivestigate/static/visuals.js
+node --check drivestigate/static/sizetree.js
 ```
 
-Tests use synthetic data and an injected model client. They cover persistence, pause/resume,
-budgets, unchanged source content/mtime, unsafe paths and symlinks, disconnected drives,
-model-output validation, exports, CSRF and session boundaries. Queue recovery, reordering,
-all-file coverage, fingerprints, graph provenance and Obsidian links are also covered. GitHub Actions defines
-Linux/macOS checks for Python 3.11, 3.12 and 3.14. Live-model and UI acceptance checks are
-documented in [docs/VALIDATION.md](docs/VALIDATION.md).
+Synthetic tests cover concurrent discovery/inference, early reports, persistence, read-only
+sampling, model/tool boundaries, pause/resume, refocusing, size coverage, deletion, queue
+ordering, session/CSRF protection and legacy compatibility. Live-model and UI checks are
+recorded in [docs/VALIDATION.md](docs/VALIDATION.md). GitHub Actions defines Linux/macOS jobs
+for Python 3.11, 3.12 and 3.14.

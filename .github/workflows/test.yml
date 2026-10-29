@@ -28,6 +28,7 @@ jobs:
       - run: node --check drivestigate/static/visuals.js
       - run: node --check drivestigate/static/comprehensive.js
       - run: node --check drivestigate/static/folders.js
+      - run: node --check drivestigate/static/sizetree.js
       - run: python -m build
       - uses: actions/upload-artifact@v4
         with:

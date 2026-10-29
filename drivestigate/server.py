@@ -116,6 +116,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/visuals.js",
                 "/comprehensive.js",
                 "/folders.js",
+                "/sizetree.js",
                 "/report.css",
                 "/style.css",
                 "/icon.svg",
@@ -129,6 +130,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/visuals.js": "text/javascript",
                     "/comprehensive.js": "text/javascript",
                     "/folders.js": "text/javascript",
+                    "/sizetree.js": "text/javascript",
                     "/report.css": "text/css",
                     "/style.css": "text/css",
                     "/icon.svg": "image/svg+xml",
@@ -219,6 +221,18 @@ class Handler(BaseHTTPRequestHandler):
                             query.get("parent", ["."])[0],
                             max(0, int(query.get("offset", [0])[0])),
                             150,
+                        )
+                    )
+                if segments[3] == "size-tree":
+                    from .sizetree import size_tree
+
+                    return self.reply(
+                        size_tree(
+                            store,
+                            scan_id,
+                            query.get("parent", ["."])[0],
+                            query.get("offset", [0])[0],
+                            sort=query.get("sort", ["size"])[0],
                         )
                     )
                 if segments[3] == "graph":
@@ -379,6 +393,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/scans":
                 settings = store.settings()
                 settings["investigation_mode"] = data.get("mode", settings["investigation_mode"])
+                if "search_focus" in data:
+                    settings["search_focus"] = data["search_focus"]
                 scan_id = engine.create(str(data.get("root", "")), str(data.get("name", "")), settings)
                 return self.reply({"id": scan_id}, 201)
             segments = path.strip("/").split("/")
@@ -398,10 +414,14 @@ class Handler(BaseHTTPRequestHandler):
                     if data.get("confirm") != scan_id:
                         raise ValueError("Confirm ejection of this investigation's source drive.")
                     return self.reply(eject_drive(engine, scan_id))
+                elif action == "focus":
+                    engine.refocus(scan_id, data)
                 elif action == "resume":
                     engine.start(scan_id)
                 elif action == "summary":
                     engine.start(scan_id, report_only=True)
+                elif action == "structure":
+                    engine.start(scan_id, structure_only=True)
                 elif action == "deepen":
                     engine.start(scan_id, finding_id=int(data["finding_id"]))
                 elif action == "reveal":

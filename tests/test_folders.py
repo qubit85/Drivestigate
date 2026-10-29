@@ -3,10 +3,13 @@ import json
 import pytest
 from test_engine import FakeOllama, wait
 
-from drivestigate.config import DEFAULTS
+from drivestigate.config import DEFAULTS as NEW_DEFAULTS
 from drivestigate.engine import Engine
 from drivestigate.folders import folder_summary
 from drivestigate.store import Store
+
+# Legacy-engine regression fixtures; progressive behavior has dedicated tests.
+DEFAULTS = {**NEW_DEFAULTS, "investigation_mode": "overview", "search_focus": ""}
 
 
 @pytest.fixture

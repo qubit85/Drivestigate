@@ -12,7 +12,7 @@ fi
 export PYINSTALLER_CONFIG_DIR="$PWD/.test-data/pyinstaller"
 .venv/bin/python -m PyInstaller --noconfirm --clean --windowed --name Drivestigate \
   --osx-bundle-identifier app.drivestigate.desktop \
-  --collect-data drivestigate --hidden-import drivestigate.extract \
+  --collect-data drivestigate --hidden-import drivestigate.extract --hidden-import drivestigate.discovery \
   --hidden-import pypdf --hidden-import PIL.Image scripts/app_entry.py
 .venv/bin/python - <<'PY'
 import plistlib

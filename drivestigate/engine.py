@@ -240,7 +240,7 @@ class Engine:
                 ]
             for scan_id in jobs:
                 scan = self.store.get_scan(scan_id)
-                report_only = scan["queue_task"].startswith("report:")
+                report_only = scan["queue_task"].startswith(("report:", "structure:"))
                 if not report_only and not self.connected(scan):
                     if scan["status"] != "waiting":
                         self.store.update(
@@ -342,18 +342,24 @@ class Engine:
         if self.active_id:
             raise ValueError("An investigation is already running. Pause it first.")
 
-    def start(self, scan_id, finding_id=None, report_only=False):
+    def start(self, scan_id, finding_id=None, report_only=False, structure_only=False):
         with self.lock:
             scan = self.store.get_scan(scan_id)
             if scan["delete_requested"]:
                 raise ValueError("This investigation is being deleted.")
             if self.active_id == scan_id:
                 raise ValueError("This investigation is already running.")
-            if report_only and scan["status"] in ("queued", "waiting", "running", "pausing", "stopping"):
+            if (report_only or structure_only) and scan["status"] in (
+                "queued",
+                "waiting",
+                "running",
+                "pausing",
+                "stopping",
+            ):
                 raise ValueError(
                     "The comprehensive report will be generated after this investigation finishes."
                 )
-            if not report_only and not self.connected(scan):
+            if not (report_only or structure_only) and not self.connected(scan):
                 raise ValueError("The original drive is disconnected or its identity has changed.")
             if finding_id is not None:
                 with self.store.connect() as db:
@@ -372,13 +378,49 @@ class Engine:
                 status="queued",
                 queue_order=scan["queue_order"] if scan["status"] in ("queued", "waiting") else order,
                 queued_finding=finding_id,
-                queue_task=f"report:{scan['status']}" if report_only else "investigate",
+                queue_task=f"structure:{scan['status']}"
+                if structure_only
+                else f"report:{scan['status']}"
+                if report_only
+                else "investigate",
                 message="Queued for comprehensive report." if report_only else "Queued for investigation.",
             )
-            if not report_only:
+            if not (report_only or structure_only):
                 with self.store.connect() as db:
                     db.execute("UPDATE scan_reports SET state='stale' WHERE scan_id=?", (scan_id,))
             self.kick()
+
+    def refocus(self, scan_id, data):
+        with self.lock:
+            scan = self.store.get_scan(scan_id)
+            if scan["settings"].get("investigation_mode") != "progressive":
+                raise ValueError("Start a progressive investigation to use an evolving search focus.")
+            if scan["status"] in ("running", "queued", "waiting", "pausing", "stopping", "deleting"):
+                raise ValueError("Pause this investigation before changing its search focus.")
+            settings = validate_settings(
+                {**scan["settings"], **{k: data[k] for k in ("system_prompt", "search_focus") if k in data}}
+            )
+            with self.store.connect() as db:
+                db.execute(
+                    "UPDATE scans SET settings=?,updated=? WHERE id=?", (json.dumps(settings), now(), scan_id)
+                )
+                db.execute(
+                    "UPDATE directories SET assessed_revision=-1,planned_revision=-1,decision='' WHERE scan_id=?",
+                    (scan_id,),
+                )
+                db.execute("UPDATE findings SET analyzed=0 WHERE scan_id=?", (scan_id,))
+                db.execute(
+                    "UPDATE investigation_tasks SET state='pending',attempts=0 WHERE scan_id=? AND state='deferred'",
+                    (scan_id,),
+                )
+                db.execute("DELETE FROM investigation_memory WHERE scan_id=?", (scan_id,))
+                db.execute("DELETE FROM scan_reports WHERE scan_id=?", (scan_id,))
+            self.store.event(
+                scan_id,
+                "focus",
+                ".",
+                "Search focus updated. Saved evidence will be reassessed on continuation.",
+            )
 
     def interrupt(self, scan_id, stop=False):
         with self.lock:
@@ -431,6 +473,23 @@ class Engine:
         started = time.monotonic()
         scan = self.store.get_scan(scan_id)
         try:
+            if scan["queue_task"].startswith("structure:"):
+                from .structure import prepare_structure
+                from .summary import catalog_report
+
+                def check_structure():
+                    if self.control.is_set():
+                        raise Interrupted()
+
+                prepare_structure(self.store, scan, check_structure)
+                self.seed_findings(scan)
+                self.store.save_report(scan_id, catalog_report(self.store, scan_id))
+                self.store.update(
+                    scan_id,
+                    status=scan["queue_task"].split(":")[1],
+                    message="Folder roles recognized from saved metadata; no source content read.",
+                )
+                return
             if scan["queue_task"].startswith("report:"):
                 from .summary import generate_report
 
@@ -439,12 +498,26 @@ class Engine:
                     scan_id, status=scan["queue_task"].split(":")[1], message="Comprehensive report ready."
                 )
                 return
-            if scan["phase"] == "inventory":
+            if scan["settings"].get("investigation_mode") == "progressive":
+                from .progressive import investigate
+
+                investigate(self, scan, finding_id)
+                return
+            inventoried = scan["phase"] == "inventory"
+            if inventoried:
                 self.inventory(scan)
                 self.checkpoint(scan)
                 self.store.rollup(scan_id)
-                self.seed_findings(scan)
                 self.store.update(scan_id, phase="analysis")
+            from .structure import VERSION, prepare_structure
+
+            if inventoried or self.store.structure(scan_id).get("version") != VERSION:
+                self.store.update(
+                    scan_id,
+                    message="Recognizing operating systems, applications and personal data locations …",
+                )
+                prepare_structure(self.store, scan, lambda: self.checkpoint(scan))
+                self.seed_findings(scan)
             if scan["settings"].get("investigation_mode") == "detail":
                 from .detail import investigate_files
 
@@ -492,6 +565,8 @@ class Engine:
 
     def progress(self, scan):
         progress = dict(scan["progress"])
+        if scan["phase"] == "progressive":
+            return progress
         live = self.live.get(scan["id"], {})
         duration = time.monotonic() - live.get("phase_started", time.monotonic())
         completed, total = progress.get("completed", 0), progress.get("total", 0)
@@ -725,11 +800,6 @@ class Engine:
     def investigate(self, scan, finding_id, started):
         settings, scan_id = scan["settings"], scan["id"]
         client = self.client_factory(settings)
-        model_info = client.test()
-        if settings["analyze_images"]:
-            capabilities = model_info.get("capabilities", [])
-            if "vision" not in capabilities:
-                raise ValueError("Image analysis is enabled, but the model does not report vision support.")
         with self.store.connect() as db:
             if finding_id:
                 pending = [finding_id]
@@ -743,6 +813,10 @@ class Engine:
                         (scan_id, settings["max_folders"]),
                     )
                 ]
+        if pending:
+            model_info = client.test()
+            if settings["analyze_images"] and "vision" not in model_info.get("capabilities", []):
+                raise ValueError("Image analysis is enabled, but the model does not report vision support.")
         calls, read = scan["llm_calls"], scan["read_bytes"]
         call_limit = calls + settings["max_llm_calls"]
         read_limit = read + settings["max_read_mb"] * 1024**2
@@ -763,7 +837,7 @@ class Engine:
             with self.store.connect() as db:
                 row = dict(
                     db.execute(
-                        "SELECT f.*,d.rel FROM findings f JOIN directories d ON d.id=f.dir_id WHERE f.id=?",
+                        "SELECT f.*,d.rel,d.role folder_role FROM findings f JOIN directories d ON d.id=f.dir_id WHERE f.id=?",
                         (fid,),
                     ).fetchone()
                 )
@@ -809,6 +883,7 @@ class Engine:
                     break
                 evidence = {
                     "folder": row["rel"],
+                    "folder_role": row["folder_role"],
                     "inventory": types,
                     "sample_note": "Only selected excerpts/metadata; no exhaustive content review.",
                     "samples": [

@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from drivestigate.config import DEFAULTS, validate_settings
+from drivestigate.config import DEFAULTS as NEW_DEFAULTS
+from drivestigate.config import validate_settings
 from drivestigate.demo import create_demo
 from drivestigate.engine import Engine, classify
 from drivestigate.extract import extract
@@ -16,6 +17,9 @@ from drivestigate.llm import Ollama
 from drivestigate.reports import csv_report, html_report, json_report
 from drivestigate.source import source_file
 from drivestigate.store import Store
+
+# Legacy-engine regression fixtures; progressive behavior has dedicated tests.
+DEFAULTS = {**NEW_DEFAULTS, "investigation_mode": "overview", "search_focus": ""}
 
 
 class FakeOllama:
